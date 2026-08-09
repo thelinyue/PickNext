@@ -33,6 +33,21 @@ describe('核心 API 纵向闭环', () => {
     expect(response.json().message).toContain('重新登录');
   });
 
+  it('普通用户只能在管理员开放注册后自助注册并直接登录', async () => {
+    const adminCookie = await setup();
+    const closed = await app.inject({ method: 'POST', url: '/api/auth/register', payload: { username: 'new-user', password: 'password123' } });
+    expect(closed.statusCode).toBe(403);
+    await app.inject({ method: 'PUT', url: '/api/admin/settings/registration', headers: { cookie: adminCookie }, payload: { open: true } });
+    expect((await app.inject({ method: 'GET', url: '/api/setup/status' })).json().registrationOpen).toBe(true);
+    const registered = await app.inject({ method: 'POST', url: '/api/auth/register', payload: { username: 'new-user', password: 'password123' } });
+    expect(registered.statusCode).toBe(201);
+    expect(registered.json().user).toMatchObject({ username: 'new-user', role: 'user', isMaintainer: false });
+    const cookieHeader = registered.headers['set-cookie'];
+    const userCookie = (Array.isArray(cookieHeader) ? cookieHeader[0] : cookieHeader)!.split(';')[0]!;
+    expect((await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie: userCookie } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/playlists/next-ktv', headers: { cookie: userCookie } })).json().playlist).not.toBeNull();
+  });
+
   it('初始化、收歌、幂等 Pick、唱完和历史可完整运行', async () => {
     const cookie = await setup();
     const created = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie }, payload: {
@@ -62,6 +77,60 @@ describe('核心 API 纵向闭环', () => {
     expect(history.json().plays[0]).toMatchObject({ title: '晴天', rating: 4, note: '状态不错' });
   });
 
+  it('Pick 上下文可以恢复当前歌曲、筛选、数量和个人筛选项', async () => {
+    const cookie = await setup();
+    const empty = await app.inject({ method: 'GET', url: '/api/picks/context', headers: { cookie } });
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json()).toMatchObject({
+      sessionId: null,
+      current: null,
+      counts: { repertoire: 0, global: 0, nextKtv: 0 },
+      facets: { languages: [], genres: [] }
+    });
+
+    const first = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie }, payload: {
+      title: '恢复测试一', artist: '歌手甲', language: '国语', genre: '流行', collectionType: 'repertoire'
+    } });
+    await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie }, payload: {
+      title: '恢复测试二', artist: '歌手乙', language: '粤语', genre: '摇滚', collectionType: 'repertoire'
+    } });
+    await app.inject({ method: 'PUT', url: `/api/playlists/next-ktv/${first.json().songId}`, headers: { cookie }, payload: {} });
+    const filters = { languages: ['国语'], genres: ['流行'], difficulties: [], ratings: [], performanceTypes: [] };
+    const picked = await app.inject({ method: 'POST', url: '/api/picks', headers: { cookie }, payload: {
+      requestId: crypto.randomUUID(), avoidRecent: false, filters
+    } });
+
+    const restored = await app.inject({ method: 'GET', url: '/api/picks/context', headers: { cookie } });
+    expect(restored.json()).toMatchObject({
+      sessionId: picked.json().sessionId,
+      current: { eventId: picked.json().eventId, song: { title: '恢复测试一' } },
+      filters,
+      avoidRecent: false,
+      counts: { repertoire: 2, global: 2, nextKtv: 1 },
+      facets: { languages: ['国语', '粤语'], genres: ['摇滚', '流行'] }
+    });
+  });
+
+  it('Pick 上下文会结束过期场次且不会泄露给其他用户', async () => {
+    const adminCookie = await setup();
+    await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie: adminCookie }, payload: {
+      title: '仅管理员场次', artist: '歌手', collectionType: 'repertoire'
+    } });
+    const picked = await app.inject({ method: 'POST', url: '/api/picks', headers: { cookie: adminCookie }, payload: { requestId: crypto.randomUUID() } });
+    await app.inject({ method: 'POST', url: '/api/admin/users', headers: { cookie: adminCookie }, payload: {
+      username: 'context-user', password: 'password123'
+    } });
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'context-user', password: 'password123' } });
+    const userHeader = login.headers['set-cookie'];
+    const userCookie = (Array.isArray(userHeader) ? userHeader[0] : userHeader)!.split(';')[0]!;
+    expect((await app.inject({ method: 'GET', url: '/api/picks/context', headers: { cookie: userCookie } })).json().current).toBeNull();
+
+    database.db.prepare(`UPDATE pick_sessions SET last_activity_at = datetime('now', '-5 hours') WHERE id = ?`).run(picked.json().sessionId);
+    const expired = await app.inject({ method: 'GET', url: '/api/picks/context', headers: { cookie: adminCookie } });
+    expect(expired.json()).toMatchObject({ sessionId: null, current: null });
+    expect((database.db.prepare('SELECT ended_at FROM pick_sessions WHERE id = ?').get(picked.json().sessionId) as any).ended_at).not.toBeNull();
+  });
+
   it('会唱曲库非空而筛选无结果时不会从全局曲库兜底', async () => {
     const cookie = await setup();
     await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie }, payload: { title: '国语歌', artist: '甲', language: '国语', collectionType: 'repertoire' } });
@@ -72,6 +141,23 @@ describe('核心 API 纵向闭环', () => {
     } });
     expect(response.statusCode).toBe(409);
     expect(response.json().code).toBe('NO_CANDIDATES');
+  });
+
+  it('跳过本场最后一首时仍记录跳过且不计为唱完', async () => {
+    const cookie = await setup();
+    await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie }, payload: {
+      title: '最后一首', artist: '歌手', collectionType: 'repertoire'
+    } });
+    const picked = await app.inject({ method: 'POST', url: '/api/picks', headers: { cookie }, payload: { requestId: crypto.randomUUID() } });
+    const exhausted = await app.inject({ method: 'POST', url: '/api/picks', headers: { cookie }, payload: {
+      requestId: crypto.randomUUID(), sessionId: picked.json().sessionId, currentEventId: picked.json().eventId
+    } });
+    expect(exhausted.statusCode).toBe(409);
+    expect(exhausted.json().code).toBe('NO_CANDIDATES');
+    expect((database.db.prepare('SELECT status FROM pick_events WHERE id = ?').get(picked.json().eventId) as any).status).toBe('skipped');
+    const history = await app.inject({ method: 'GET', url: '/api/history', headers: { cookie } });
+    expect(history.json().items).toEqual([expect.objectContaining({ title: '最后一首', status: 'skipped' })]);
+    expect((database.db.prepare('SELECT count(*) AS count FROM plays').get() as any).count).toBe(0);
   });
 
   it('曲库搜索按数据范围隔离，并只在三人评分后返回匿名聚合', async () => {
@@ -147,15 +233,32 @@ describe('核心 API 纵向闭环', () => {
       expect.objectContaining({ id: userId, username: 'new-singer', isMaintainer: true, canAddSongs: true })
     ]));
 
-    await app.inject({ method: 'PUT', url: `/api/admin/users/${userId}`, headers: { cookie: adminCookie }, payload: { canAddSongs: false } });
     const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'new-singer', password: 'password123' } });
     const header = login.headers['set-cookie'];
     const userCookie = (Array.isArray(header) ? header[0] : header)!.split(';')[0]!;
+    const song = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie: adminCookie }, payload: {
+      title: '待维护歌曲', artist: '原歌手', collectionType: 'learning'
+    } });
+    const songId = song.json().songId;
+    expect((await app.inject({ method: 'PUT', url: `/api/songs/${songId}`, headers: { cookie: userCookie }, payload: {
+      title: '管家维护歌曲', artist: '新歌手', performanceType: 'solo'
+    } })).statusCode).toBe(200);
+    await app.inject({ method: 'PUT', url: `/api/admin/users/${userId}`, headers: { cookie: adminCookie }, payload: { isMaintainer: false, canAddSongs: false } });
     const forbiddenAdd = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie: userCookie }, payload: {
       title: '不能添加', artist: '测试', collectionType: 'learning'
     } });
     expect(forbiddenAdd.statusCode).toBe(403);
     expect((await app.inject({ method: 'GET', url: '/api/admin/users', headers: { cookie: userCookie } })).statusCode).toBe(403);
+
+    const maintained = await app.inject({ method: 'PUT', url: `/api/songs/${songId}`, headers: { cookie: adminCookie }, payload: {
+      title: '已维护歌曲', artist: '新歌手', version: 'Live', language: '国语', genre: '流行',
+      difficulty: 'medium', performanceType: 'solo', lyrics: '[00:01.00]第一句', lyricsTranslit: null
+    } });
+    expect(maintained.statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: `/api/songs/${songId}`, headers: { cookie: adminCookie } })).json()).toMatchObject({ title: '已维护歌曲', lyrics: '[00:01.00]第一句' });
+    expect((await app.inject({ method: 'PUT', url: `/api/songs/${songId}`, headers: { cookie: userCookie }, payload: {
+      title: '越权修改', artist: '新歌手', performanceType: 'solo'
+    } })).statusCode).toBe(403);
 
     expect((await app.inject({ method: 'PUT', url: `/api/admin/users/${userId}/password`, headers: { cookie: adminCookie }, payload: { password: 'changed123' } })).statusCode).toBe(200);
     expect((await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'new-singer', password: 'changed123' } })).statusCode).toBe(200);
@@ -172,5 +275,78 @@ describe('核心 API 纵向闭环', () => {
     expect((await app.inject({ method: 'GET', url: '/api/playlists/next-ktv', headers: { cookie } })).json().songs).toHaveLength(1);
     const cleared = await app.inject({ method: 'DELETE', url: '/api/playlists/next-ktv', headers: { cookie } });
     expect(cleared.json()).toMatchObject({ ok: true, removed: 1 });
+
+    await app.inject({ method: 'PUT', url: `/api/playlists/next-ktv/${first.json().songId}`, headers: { cookie }, payload: {} });
+    const picked = await app.inject({ method: 'POST', url: '/api/picks', headers: { cookie }, payload: { requestId: crypto.randomUUID() } });
+    expect(picked.json()).toMatchObject({ source: 'ktv', song: { id: first.json().songId } });
+    const ratingRequired = await app.inject({ method: 'POST', url: `/api/picks/${picked.json().eventId}/complete`, headers: { cookie }, payload: { requestId: crypto.randomUUID() } });
+    expect(ratingRequired.statusCode).toBe(422);
+    const completed = await app.inject({ method: 'POST', url: `/api/picks/${picked.json().eventId}/complete`, headers: { cookie }, payload: { requestId: crypto.randomUUID(), rating: 4 } });
+    expect(completed.statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/playlists/next-ktv', headers: { cookie } })).json().songs).toHaveLength(0);
+  });
+
+  it('曲库按歌名拼音分组，并对完整数据执行个人筛选', async () => {
+    const cookie = await setup();
+    for (const song of [
+      { title: '晴天', artist: '周杰伦', language: '国语', genre: '流行', difficulty: 'easy' },
+      { title: '海阔天空', artist: 'Beyond', language: '粤语', genre: '摇滚', difficulty: 'hard' },
+      { title: '123木头人', artist: '黑涩会美眉', language: '国语', genre: '流行', difficulty: 'medium' }
+    ]) await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie }, payload: { ...song, collectionType: 'repertoire' } });
+    const full = await app.inject({ method: 'GET', url: '/api/search?scope=personal&collection=repertoire&limit=2', headers: { cookie } });
+    expect(full.statusCode).toBe(200);
+    expect(full.json()).toMatchObject({ total: 3, hasMore: true });
+    expect(full.json().alphabetIndex).toEqual(expect.arrayContaining([
+      expect.objectContaining({ initial: 'H', count: 1 }),
+      expect.objectContaining({ initial: 'Q', count: 1 }),
+      expect.objectContaining({ initial: '#', count: 1 })
+    ]));
+    const hard = await app.inject({ method: 'GET', url: '/api/search?scope=personal&collection=repertoire&difficulties=hard', headers: { cookie } });
+    expect(hard.json().songs).toHaveLength(1);
+    expect(hard.json().songs[0]).toMatchObject({ title: '海阔天空', titleInitial: 'H' });
+    const songId = hard.json().songs[0].id;
+    expect((await app.inject({ method: 'PATCH', url: `/api/user-songs/${songId}/meta`, headers: { cookie }, payload: { rating: 5, personalDifficulty: 'easy', keyShift: 0, note: '聚会开场', memoryCue: '海风画面' } })).statusCode).toBe(200);
+    const strong = await app.inject({ method: 'GET', url: '/api/search?scope=personal&collection=repertoire&scene=strong', headers: { cookie } });
+    expect(strong.json().songs[0]).toMatchObject({ id: songId, rating: 5, personalDifficulty: 'easy', keyShift: 0 });
+    const compactPinyin = await app.inject({ method: 'GET', url: '/api/search?scope=personal&collection=repertoire&q=haikuotiankong', headers: { cookie } });
+    expect(compactPinyin.json().songs[0]).toMatchObject({ id: songId });
+    const memorySearch = await app.inject({ method: 'GET', url: '/api/search?scope=personal&collection=repertoire&q=海风画面', headers: { cookie } });
+    expect(memorySearch.json().songs[0]).toMatchObject({ id: songId });
+  });
+
+  it('普通歌单协作者可以共同维护歌曲但不能管理歌单', async () => {
+    const ownerCookie = await setup();
+    const createdUser = await app.inject({ method: 'POST', url: '/api/admin/users', headers: { cookie: ownerCookie }, payload: { username: 'collaborator', password: 'password123' } });
+    const collaboratorId = createdUser.json().userId;
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'collaborator', password: 'password123' } });
+    const header = login.headers['set-cookie']; const collaboratorCookie = (Array.isArray(header) ? header[0] : header)!.split(';')[0]!;
+    const song = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie: ownerCookie }, payload: { title: '协作歌曲', artist: '歌手', collectionType: 'repertoire' } });
+    const playlist = await app.inject({ method: 'POST', url: '/api/playlists', headers: { cookie: ownerCookie }, payload: { name: '生日局', collaboratorUserIds: [collaboratorId] } });
+    const playlistId = playlist.json().playlistId;
+    expect((await app.inject({ method: 'GET', url: '/api/playlists', headers: { cookie: collaboratorCookie } })).json().playlists[0]).toMatchObject({ id: playlistId, access: 'collaborator' });
+    expect((await app.inject({ method: 'PUT', url: `/api/playlists/${playlistId}/songs/${song.json().songId}`, headers: { cookie: collaboratorCookie }, payload: {} })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'PATCH', url: `/api/playlists/${playlistId}`, headers: { cookie: collaboratorCookie }, payload: { name: '越权改名' } })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'DELETE', url: `/api/playlists/${playlistId}`, headers: { cookie: collaboratorCookie } })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'GET', url: `/api/playlists/${playlistId}`, headers: { cookie: ownerCookie } })).json().songs).toHaveLength(1);
+  });
+
+  it('精确重复必须复用或审核，审核合并不会创建第二首全局歌曲', async () => {
+    const adminCookie = await setup();
+    const original = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie: adminCookie }, payload: { title: '光年之外', artist: 'G.E.M.', version: 'Live', collectionType: 'repertoire' } });
+    const user = await app.inject({ method: 'POST', url: '/api/admin/users', headers: { cookie: adminCookie }, payload: { username: 'submitter', password: 'password123' } });
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'submitter', password: 'password123' } });
+    const header = login.headers['set-cookie']; const userCookie = (Array.isArray(header) ? header[0] : header)!.split(';')[0]!;
+    const duplicatePayload = { title: ' 光年之外 ', artist: 'g.e.m', version: 'LIVE', collectionType: 'learning' };
+    const duplicate = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie: userCookie }, payload: duplicatePayload });
+    expect(duplicate.statusCode).toBe(409); expect(duplicate.json().code).toBe('EXACT_DUPLICATE');
+    const submitted = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie: userCookie }, payload: { ...duplicatePayload, duplicateAction: 'submit_review', matchedSongId: original.json().songId } });
+    expect(submitted.statusCode).toBe(202);
+    expect((await app.inject({ method: 'GET', url: '/api/reviews', headers: { cookie: userCookie } })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'POST', url: `/api/reviews/${submitted.json().submissionId}/merge`, headers: { cookie: adminCookie }, payload: {} })).statusCode).toBe(200);
+    expect((database.db.prepare("SELECT count(*) AS count FROM songs WHERE status = 'active'").get() as any).count).toBe(1);
+    const personal = await app.inject({ method: 'GET', url: '/api/search?scope=personal&collection=learning', headers: { cookie: userCookie } });
+    expect(personal.json().songs[0]).toMatchObject({ id: original.json().songId });
+    expect((await app.inject({ method: 'POST', url: `/api/reviews/${submitted.json().submissionId}/reject`, headers: { cookie: adminCookie }, payload: {} })).statusCode).toBe(409);
+    expect(user.json().userId).toBeGreaterThan(0);
   });
 });

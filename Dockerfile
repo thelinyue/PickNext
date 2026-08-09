@@ -20,7 +20,8 @@ COPY migrations ./migrations
 RUN pnpm build
 
 FROM node:24-bookworm-slim AS runtime
-ENV NODE_ENV=production DATABASE_PATH=/data/picknext.db PORT=5560
+# 默认使用东八区；部署时可通过环境变量 TZ（例如 TZ=UTC）覆盖。
+ENV NODE_ENV=production DATABASE_PATH=/data/picknext.db PORT=5560 TZ=Asia/Shanghai
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/apps/server/node_modules ./apps/server/node_modules
@@ -33,7 +34,12 @@ COPY --from=build /app/packages/pick-engine/package.json ./packages/pick-engine/
 COPY --from=build /app/packages/pick-engine/node_modules ./packages/pick-engine/node_modules
 COPY --from=build /app/packages/pick-engine/dist ./packages/pick-engine/dist
 COPY --from=build /app/migrations ./migrations
-RUN mkdir -p /data && chown -R node:node /data
+# 安装时区数据库，确保 Node.js 与容器内 date 命令均能识别 TZ 配置。
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends tzdata \
+  && rm -rf /var/lib/apt/lists/* \
+  && mkdir -p /data \
+  && chown -R node:node /data
 USER node
 EXPOSE 5560
 VOLUME ["/data"]

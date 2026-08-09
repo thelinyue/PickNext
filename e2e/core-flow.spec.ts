@@ -1,71 +1,166 @@
 import { expect, test } from '@playwright/test';
 
-test('移动端曲库收录 → 下一次 KTV → Pick 主按钮切歌 → 唱完 → 历史', async ({ page }) => {
-  const requestedPorts = new Set<string>();
-  page.on('request', (request) => requestedPorts.add(new URL(request.url()).port));
-  await page.goto('/');
-  await expect.poll(() => page.evaluate(() => fetch('/api/health').then((response) => response.status))).toBe(200);
-  await page.getByLabel('用户名').fill('singing-lover');
-  await page.getByLabel('密码').fill('password123');
-  await page.getByRole('button', { name: '完成初始化' }).click();
+test.describe.serial('PickNext v1.0 移动端核心闭环', () => {
+  test('管理员建用户 → 添加维护歌曲 → KTV 清空/重加 → Pick 跟唱评分 → 唱完移出', async ({ page }) => {
+    const requestedPorts = new Set<string>();
+    let pickRequests = 0;
+    page.on('request', (request) => requestedPorts.add(new URL(request.url()).port));
+    page.on('request', (request) => { if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/picks') pickRequests += 1; });
+    await page.goto('/');
+    await expect.poll(() => page.evaluate(() => fetch('/api/health').then((response) => response.status))).toBe(200);
+    await page.getByLabel('用户名').fill('singing-lover');
+    await page.getByLabel('密码').fill('password123');
+    await page.getByRole('button', { name: '完成初始化' }).click();
+    for (const viewport of [{ width: 360, height: 740 }, { width: 432, height: 698 }, { width: 476, height: 891 }]) {
+      await page.setViewportSize(viewport);
+      const pickButton = await page.getByRole('button', { name: '开始 Pick' }).boundingBox();
+      const orb = await page.locator('.nav-pick-orb').boundingBox();
+      const navigation = await page.getByRole('navigation', { name: '主导航' }).boundingBox();
+      const library = await page.getByRole('button', { name: '曲库', exact: true }).boundingBox();
+      const me = await page.getByRole('button', { name: '我的' }).boundingBox();
+      expect(Math.abs(pickButton!.x + pickButton!.width / 2 - viewport.width / 2)).toBeLessThan(1);
+      expect(navigation!.y - orb!.y).toBeGreaterThanOrEqual(14);
+      expect(navigation!.y - orb!.y).toBeLessThanOrEqual(18);
+      expect(Math.abs((viewport.width / 2 - (library!.x + library!.width / 2)) - ((me!.x + me!.width / 2) - viewport.width / 2))).toBeLessThan(1);
+    }
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    const reducedDuration = await page.locator('.nav-pick-orb').evaluate((element) => getComputedStyle(element, '::before').animationDuration);
+    const reducedSeconds = reducedDuration.endsWith('ms') ? Number.parseFloat(reducedDuration) / 1000 : Number.parseFloat(reducedDuration);
+    expect(reducedSeconds).toBeLessThanOrEqual(.001);
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
 
-  await page.getByRole('button', { name: '我的' }).click();
-  await page.getByRole('button', { name: /用户与权限/ }).click();
-  await page.getByRole('button', { name: '新增用户' }).click();
-  await page.getByLabel('用户名').last().fill('e2e-user');
-  await page.getByLabel('初始密码').fill('e2e-password');
-  await page.getByRole('button', { name: '创建账号' }).click();
-  await expect(page.getByText('e2e-user')).toBeVisible();
-  await page.getByRole('dialog', { name: '用户与权限' }).getByRole('button', { name: '关闭' }).click();
+    await page.getByRole('button', { name: '我的' }).click();
+    await page.getByRole('button', { name: /用户与权限/ }).click();
+    await page.getByLabel('开放用户注册').click();
+    await expect(page.getByLabel('开放用户注册')).toBeChecked();
+    await page.getByRole('button', { name: '新增用户' }).click();
+    await page.getByLabel('用户名').last().fill('e2e-user');
+    await page.getByLabel('初始密码').fill('e2e-password');
+    await page.getByRole('button', { name: '创建账号' }).click();
+    await expect(page.getByText('e2e-user')).toBeVisible();
+    await page.getByRole('dialog', { name: '用户与权限' }).getByRole('button', { name: '关闭' }).click();
 
-  await page.getByRole('button', { name: '曲库', exact: true }).click();
-  await page.locator('header').getByRole('button', { name: '添加歌曲' }).click();
-  const performanceSelect = page.getByLabel('演唱类型');
-  const collectionSelect = page.getByLabel('先放到');
-  await expect(performanceSelect.locator('option')).toHaveText(['独唱', '对唱', '合唱']);
-  await expect(collectionSelect.locator('option')).toHaveText(['待学清单', '会唱曲库']);
-  await performanceSelect.selectOption('chorus');
-  await expect(performanceSelect).toHaveValue('chorus');
-  await performanceSelect.selectOption('solo');
-  const optionColors = await performanceSelect.locator('option').first().evaluate((option) => {
-    const style = getComputedStyle(option);
-    return { color: style.color, backgroundColor: style.backgroundColor };
+    await page.getByRole('button', { name: '曲库', exact: true }).click();
+    await page.locator('header').getByRole('button', { name: '添加歌曲' }).click();
+    await page.getByLabel('演唱类型').selectOption('solo');
+    await page.getByLabel('先放到').selectOption('repertoire');
+    await page.getByLabel('歌名').fill('晴天');
+    await page.getByLabel('歌手').fill('周杰伦');
+    await page.getByRole('button', { name: '收进曲库' }).click();
+    await expect(page.getByText('晴天')).toBeVisible();
+
+    await page.getByRole('button', { name: '查看晴天详情' }).click();
+    await page.getByRole('button', { name: '编辑全局歌曲信息' }).click();
+    const editSong = page.getByRole('dialog', { name: '编辑全局歌曲' });
+    await editSong.getByLabel('版本').fill('原版');
+    await editSong.getByLabel('语种').fill('国语');
+    await editSong.getByLabel('曲风').fill('流行');
+    await editSong.getByLabel('参考难度').selectOption('medium');
+    await editSong.getByLabel('LRC / 歌词').fill('[00:01.00]故事的小黄花\n[00:03.00]从出生那年就飘着\n[00:05.00]童年的荡秋千');
+    await editSong.getByRole('button', { name: '保存全局信息' }).click();
+    await expect(editSong).toBeHidden();
+
+    await page.getByRole('button', { name: '将晴天加入下一次 KTV' }).click();
+    await expect(page.getByText('已经准备 1 首 · Pick 时优先')).toBeVisible();
+    await page.getByRole('button', { name: /下一次 KTV/ }).first().click();
+    const ktvSheet = page.getByRole('dialog', { name: '下一次 KTV' });
+    await ktvSheet.getByRole('button', { name: '清空歌单' }).click();
+    await ktvSheet.getByRole('button', { name: '确认清空' }).click();
+    await expect(ktvSheet.getByText('还没有准备歌曲')).toBeVisible();
+    await ktvSheet.getByRole('button', { name: '关闭' }).click();
+    await page.getByRole('button', { name: '将晴天加入下一次 KTV' }).click();
+
+    await page.evaluate(async () => {
+      const created = await fetch('/api/songs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+        title: '海阔天空', artist: 'Beyond', language: '粤语', genre: '摇滚', difficulty: 'medium', collectionType: 'learning'
+      }) }).then((response) => response.json());
+      await fetch(`/api/user-songs/${created.songId}`, { method: 'DELETE' });
+    });
+    await page.getByRole('tab', { name: /全部曲库/ }).click();
+    await expect(page.getByText('海阔天空')).toBeVisible();
+    await page.getByRole('button', { name: '＋ 收录' }).click();
+    await page.getByRole('button', { name: '加入会唱曲库' }).click();
+
+    await page.getByRole('button', { name: '开始 Pick' }).click();
+    await expect(page.getByRole('heading', { name: '晴天' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '跳过这首' })).toBeVisible();
+    expect(pickRequests).toBe(1);
+    await page.reload();
+    await expect(page.getByRole('heading', { name: '晴天' })).toBeVisible();
+    expect(pickRequests).toBe(1);
+    await page.context().setOffline(true);
+    await expect(page.getByRole('status').filter({ hasText: '当前处于离线状态' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '晴天' })).toBeVisible();
+    await page.context().setOffline(false);
+    await expect(page.getByText('网络已恢复，正在刷新数据。')).toBeVisible();
+    await expect(page.getByText('故事的小黄花')).toBeVisible();
+    await page.getByRole('button', { name: /歌词计时跟唱/ }).click();
+    const karaoke = page.getByRole('dialog', { name: '晴天歌词计时跟唱' });
+    await karaoke.getByRole('button', { name: '开始计时' }).click();
+    await karaoke.getByRole('button', { name: '暂停' }).click();
+    await karaoke.getByRole('button', { name: '关闭跟唱' }).click();
+
+    await page.getByRole('button', { name: '我的' }).click();
+    await page.getByRole('button', { name: '返回当前歌曲' }).click();
+    await expect(page.getByRole('heading', { name: '晴天' })).toBeVisible();
+    expect(pickRequests).toBe(1);
+    await page.getByRole('button', { name: '唱完了' }).click();
+    const rating = page.getByRole('dialog', { name: '第一次唱完' });
+    await expect(rating).toBeVisible();
+    await rating.getByRole('button', { name: '保存并下一首' }).click();
+    const ktvFinished = page.getByRole('dialog', { name: '下一次 KTV 已唱完' });
+    await expect(ktvFinished).toBeVisible();
+    await ktvFinished.getByRole('button', { name: '继续唱会唱曲库' }).click();
+    await expect(page.getByRole('heading', { name: '海阔天空' })).toBeVisible();
+    await page.getByRole('button', { name: '跳过这首' }).click();
+    await expect(page.getByRole('button', { name: '处理本场' })).toBeVisible();
+
+    await page.getByRole('button', { name: '曲库', exact: true }).click();
+    await page.getByRole('button', { name: /下一次 KTV/ }).first().click();
+    await expect(page.getByRole('dialog', { name: '下一次 KTV' }).getByText('还没有准备歌曲')).toBeVisible();
+    await page.getByRole('dialog', { name: '下一次 KTV' }).getByRole('button', { name: '关闭' }).click();
+    await page.getByRole('button', { name: '我的' }).click();
+    await expect(page.getByText('点歌历史')).toBeVisible();
+    await page.getByRole('button', { name: /点歌历史/ }).click();
+    const historyDialog = page.getByRole('dialog', { name: '点歌历史' });
+    await expect(historyDialog.getByText('晴天')).toBeVisible();
+    await expect(historyDialog.getByText('海阔天空')).toBeVisible();
+    await expect(historyDialog.locator('.history-status.skipped')).toHaveText('未唱');
+    expect([...requestedPorts]).toEqual([process.env.E2E_PORT ?? '5560']);
   });
-  expect(optionColors.color).not.toBe(optionColors.backgroundColor);
-  await page.getByLabel('歌名').fill('晴天');
-  await page.getByLabel('歌手').fill('周杰伦');
-  await page.getByRole('button', { name: '收进曲库' }).click();
-  await expect(page.getByText('晴天')).toBeVisible();
-  await page.getByRole('button', { name: '将晴天加入下一次 KTV' }).click();
-  await expect(page.getByText('已经准备 1 首 · Pick 时优先')).toBeVisible();
-  await page.getByRole('button', { name: /下一次 KTV/ }).first().click();
-  await expect(page.getByRole('dialog', { name: '下一次 KTV' }).getByText('晴天')).toBeVisible();
-  await expect(page.getByRole('dialog', { name: '下一次 KTV' }).getByRole('button', { name: '添加歌曲' })).toBeVisible();
-  await expect(page.getByRole('dialog', { name: '下一次 KTV' }).getByRole('button', { name: '清空歌单' })).toBeVisible();
-  await page.getByRole('dialog', { name: '下一次 KTV' }).getByRole('button', { name: '关闭' }).click();
 
-  await page.evaluate(async () => {
-    const created = await fetch('/api/songs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
-      title: '海阔天空', artist: 'Beyond', language: '粤语', genre: '摇滚', difficulty: 'medium', collectionType: 'learning'
-    }) }).then((response) => response.json());
-    await fetch(`/api/user-songs/${created.songId}`, { method: 'DELETE' });
+  test('开放注册后普通用户可注册、自动登录、使用个人曲库并重新登录', async ({ page }) => {
+    await page.goto('/');
+    await page.getByRole('button', { name: '没有账号？立即注册' }).click();
+    await page.getByLabel('用户名').fill('registered-user');
+    await page.getByLabel('密码').fill('registered-password');
+    await page.getByRole('button', { name: '注册并登录' }).click();
+    await expect(page.getByText('先准备你的会唱曲库')).toBeVisible();
+    await page.getByRole('button', { name: '去全部曲库选歌' }).click();
+    await expect(page.getByRole('tab', { name: /全部曲库/ })).toHaveAttribute('data-state', 'active');
+    await page.locator('header').getByRole('button', { name: '添加歌曲' }).click();
+    await page.getByRole('textbox', { name: '歌名', exact: true }).fill('普通用户的歌');
+    await page.getByLabel('歌手').fill('测试歌手');
+    await page.getByLabel('先放到').selectOption('repertoire');
+    await page.getByRole('button', { name: '收进曲库' }).click();
+    await expect(page.getByText('普通用户的歌')).toBeVisible();
+    expect(await page.evaluate(() => fetch('/api/songs/1', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: '越权', artist: '测试', performanceType: 'solo' }) }).then((response) => response.status))).toBe(403);
+    await page.getByRole('button', { name: '开始 Pick' }).click();
+    await expect(page.getByRole('heading', { name: '普通用户的歌' })).toBeVisible();
+    await page.getByRole('button', { name: '唱完了' }).click();
+    await page.getByRole('dialog', { name: '第一次唱完' }).getByRole('button', { name: '保存并下一首' }).click();
+    await expect(page.getByRole('button', { name: '处理本场' })).toBeVisible();
+    await page.getByRole('button', { name: '处理本场' }).click();
+    await expect(page.getByRole('dialog', { name: '本场已经唱完' })).toBeVisible();
+    await page.getByRole('dialog', { name: '本场已经唱完' }).getByRole('button', { name: '结束本场' }).click();
+    await page.getByRole('button', { name: '我的' }).click();
+    await expect(page.getByRole('heading', { name: 'registered-user' })).toBeVisible();
+    await expect(page.getByRole('button', { name: /用户与权限/ })).toHaveCount(0);
+    await page.getByRole('button', { name: '退出登录' }).click();
+    await page.getByLabel('用户名').fill('registered-user');
+    await page.getByLabel('密码').fill('registered-password');
+    await page.getByRole('button', { name: '登录' }).click();
+    await page.getByRole('button', { name: '我的' }).click();
+    await expect(page.getByRole('heading', { name: 'registered-user' })).toBeVisible();
   });
-  await page.getByRole('tab', { name: /全部曲库/ }).click();
-  await expect(page.getByText('海阔天空')).toBeVisible();
-  await page.getByRole('button', { name: '＋ 收录' }).click();
-  await page.getByRole('button', { name: '加入会唱曲库' }).click();
-  await page.getByRole('tab', { name: /我的曲库/ }).click();
-  await expect(page.getByText('海阔天空')).toBeVisible();
-
-  await page.getByRole('button', { name: 'Pick 一首' }).click();
-  await expect(page.getByRole('heading', { name: '晴天' })).toBeVisible();
-  await page.getByRole('button', { name: '换一首' }).click();
-  await expect(page.getByRole('heading', { name: '海阔天空' })).toBeVisible();
-  await page.getByRole('button', { name: '唱完了' }).click();
-  await page.getByRole('button', { name: '保存并下一首' }).click();
-
-  await page.getByRole('button', { name: '我的' }).click();
-  await expect(page.getByText('点歌历史')).toBeVisible();
-  await expect(page.getByText('海阔天空')).toBeVisible();
-  expect([...requestedPorts]).toEqual(['5560']);
 });

@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AppDatabase } from './db.js';
 import { hashPassword } from './auth.js';
+import { buildSongIndex } from './song-utils.js';
 
 const TEST_PASSWORD = 'PickNext123!';
 const accountDefinitions = [
@@ -89,8 +90,8 @@ async function main() {
 
     const adminId = userIds.get('admin_demo')!;
     const upsertSong = database.db.prepare(`
-      INSERT INTO songs(title, artist, language, genre, difficulty, performance_type, version, added_by)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO songs(title, artist, language, genre, difficulty, performance_type, version, pinyin, title_initial, added_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const songIds: number[] = [];
     for (const [title, artist, language, genre, difficulty, performanceType, version] of songDefinitions) {
@@ -99,7 +100,8 @@ async function main() {
           AND coalesce(version, '') = coalesce(?, '') AND status = 'active'
       `).get(title, artist, version) as { id: number } | undefined;
       if (!song) {
-        const result = upsertSong.run(title, artist, language, genre, difficulty, performanceType, version, adminId);
+        const index = buildSongIndex(title);
+        const result = upsertSong.run(title, artist, language, genre, difficulty, performanceType, version, index.pinyin, index.titleInitial, adminId);
         song = { id: Number(result.lastInsertRowid) };
       }
       songIds.push(song.id);
