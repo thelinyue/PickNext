@@ -274,6 +274,27 @@ export const adminUpdateUserSchema = z.object({
 });
 export const adminResetPasswordSchema = z.object({ password: z.string().min(8).max(200) });
 
+export const adminUsersQuerySchema = z.object({
+  q: z.string().trim().max(40).default(''),
+  type: z.enum(['all', 'admin', 'maintainer', 'user']).default('all'),
+  canAddSongs: z.enum(['all', 'allowed', 'denied']).default('all'),
+  login: z.enum(['all', 'logged', 'never']).default('all'),
+  sort: z.enum(['created_desc', 'username_asc', 'last_login_desc']).default('created_desc'),
+  limit: z.coerce.number().int().min(1).max(100).default(30),
+  offset: z.coerce.number().int().min(0).default(0)
+});
+
+const adminUserIdsSchema = z.array(z.number().int().positive()).min(1).max(50)
+  .transform((ids) => [...new Set(ids)]);
+
+export const adminBulkPermissionsSchema = adminUpdateUserSchema.and(z.object({ userIds: adminUserIdsSchema }));
+export const adminDeletionPreviewSchema = z.object({ userIds: adminUserIdsSchema });
+export const adminDeletionSchema = z.object({
+  adminPassword: z.string().min(8).max(200),
+  confirmed: z.literal(true)
+});
+export const adminBulkDeletionSchema = adminDeletionSchema.extend({ userIds: adminUserIdsSchema });
+
 export interface AdminUser {
   id: number;
   username: string;
@@ -281,6 +302,41 @@ export interface AdminUser {
   isMaintainer: boolean;
   canAddSongs: boolean;
   createdAt: string;
+  lastLoginAt: string | null;
+  personalSongCount: number;
+}
+
+export interface AdminUsersSummary {
+  total: number;
+  maintainers: number;
+  addSongsDenied: number;
+  neverLoggedIn: number;
+}
+
+export interface AdminUsersResponse {
+  users: AdminUser[];
+  total: number;
+  hasMore: boolean;
+  summary: AdminUsersSummary;
+}
+
+export interface AdminUserDetail extends AdminUser {
+  repertoireCount: number;
+  learningCount: number;
+  playCount: number;
+  playlistCount: number;
+  pickSessionCount: number;
+  contributedSongCount: number;
+}
+
+export interface UserDeletionImpact {
+  userCount: number;
+  usernames: string[];
+  personalSongCount: number;
+  playCount: number;
+  playlistCount: number;
+  pickSessionCount: number;
+  contributedSongCount: number;
 }
 
 export const importSchema = z.object({

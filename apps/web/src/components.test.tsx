@@ -1,9 +1,12 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppShell, Button, EmptyState, NetworkBanner, Sheet, SongCard } from './components.js';
 import { FirstUseGuide } from './pick.js';
+import { AdminUsersPage } from './admin-users.js';
+import { AuthScreen } from './auth.js';
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('基础界面组件', () => {
   it('禁用按钮不冒充加载状态', () => {
@@ -80,5 +83,32 @@ describe('基础界面组件', () => {
   it('离线横幅说明已加载内容仍可查看', () => {
     render(<NetworkBanner />);
     expect(screen.getByRole('status')).toHaveTextContent('已加载内容仍可查看');
+  });
+
+  it('独立用户管理页展示服务端统计并支持进入多选模式', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes('/api/setup/status')) return new Response(JSON.stringify({ required: false, registrationOpen: true }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({
+        users: [{ id: 2, username: 'linyue', role: 'user', isMaintainer: false, canAddSongs: true, createdAt: '2026-08-01 12:00:00', lastLoginAt: null, personalSongCount: 12 }],
+        total: 1, hasMore: false, summary: { total: 1, maintainers: 0, addSongsDenied: 0, neverLoggedIn: 1 }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><AdminUsersPage onBack={vi.fn()} notify={vi.fn()} /></QueryClientProvider>);
+    expect(await screen.findByText('linyue')).not.toBeNull();
+    expect(screen.getByLabelText('允许普通用户注册')).not.toBeNull();
+    expect(screen.getByText('12 首个人歌曲 · 可添加歌曲')).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '选择' }));
+    fireEvent.click(screen.getByRole('button', { name: '选择linyue' }));
+    expect(screen.getByText('已选 1/50')).not.toBeNull();
+    expect(screen.getByRole('button', { name: /删除/ })).not.toBeNull();
+  });
+
+  it('开放注册时登录页显示普通用户注册入口', () => {
+    render(<AuthScreen setupRequired={false} registrationOpen onSuccess={vi.fn()} />);
+    expect(screen.getByRole('button', { name: '没有账号？立即注册' })).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '没有账号？立即注册' }));
+    expect(screen.getByRole('heading', { name: '注册账号' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: '注册并登录' })).not.toBeNull();
   });
 });

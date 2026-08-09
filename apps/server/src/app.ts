@@ -8,8 +8,13 @@ import staticPlugin from '@fastify/static';
 import { ZodError, z } from 'zod';
 import {
   adminCreateUserSchema,
+  adminBulkDeletionSchema,
+  adminBulkPermissionsSchema,
+  adminDeletionPreviewSchema,
+  adminDeletionSchema,
   adminResetPasswordSchema,
   adminUpdateUserSchema,
+  adminUsersQuerySchema,
   approveReviewSchema,
   collectionUpdateSchema,
   completePickSchema,
@@ -108,7 +113,7 @@ export async function buildApp(context: AppContext) {
       const token = await request.jwtVerify<UserPayload>();
       const row = context.db.prepare(`
         SELECT id, username, role, is_maintainer AS isMaintainer, can_add_songs AS canAddSongs
-        FROM users WHERE id = ?
+        FROM users WHERE id = ? AND is_system = 0
       `).get(token.id) as any;
       if (!row) throw new Error('账号不存在');
       request.user = { ...row, isMaintainer: Boolean(row.isMaintainer), canAddSongs: Boolean(row.canAddSongs) };
@@ -147,17 +152,17 @@ export async function buildApp(context: AppContext) {
 
   app.get('/api/health', async () => ({ status: 'ok' }));
   app.get('/api/setup/status', async () => ({
-    required: (context.db.prepare('SELECT count(*) AS count FROM users').get() as { count: number }).count === 0,
+    required: (context.db.prepare('SELECT count(*) AS count FROM users WHERE is_system = 0').get() as { count: number }).count === 0,
     registrationOpen: (context.db.prepare("SELECT value FROM app_settings WHERE key = 'registration_open'").get() as { value: string } | undefined)?.value === 'true'
   }));
 
   app.post('/api/setup', async (request, reply) => {
     const body = setupSchema.parse(request.body);
-    if ((context.db.prepare('SELECT count(*) AS count FROM users').get() as { count: number }).count > 0) {
+    if ((context.db.prepare('SELECT count(*) AS count FROM users WHERE is_system = 0').get() as { count: number }).count > 0) {
       return reply.code(409).send({ code: 'ALREADY_SETUP', message: '系统已经完成初始化。' });
     }
     const result = context.db.prepare(`
-      INSERT INTO users(username, password_hash, role) VALUES (?, ?, 'admin')
+      INSERT INTO users(username, password_hash, role, last_login_at) VALUES (?, ?, 'admin', datetime('now'))
     `).run(body.username, await hashPassword(body.password));
     const user: UserPayload = { id: Number(result.lastInsertRowid), username: body.username, role: 'admin', isMaintainer: false, canAddSongs: true };
     context.db.prepare(`INSERT INTO playlists(owner_id, name, kind) VALUES (?, '下一次 KTV', 'next_ktv')`).run(user.id);
@@ -169,7 +174,7 @@ export async function buildApp(context: AppContext) {
     const body = loginSchema.parse(request.body);
     const row = context.db.prepare(`
       SELECT id, username, role, password_hash, is_maintainer, can_add_songs
-      FROM users WHERE username = ? COLLATE NOCASE
+      FROM users WHERE username = ? COLLATE NOCASE AND is_system = 0
     `).get(body.username) as any;
     if (!row || !(await verifyPassword(body.password, row.password_hash))) {
       return reply.code(401).send({ code: 'INVALID_CREDENTIALS', message: '用户名或密码不正确。' });
@@ -181,6 +186,7 @@ export async function buildApp(context: AppContext) {
       isMaintainer: Boolean(row.is_maintainer),
       canAddSongs: Boolean(row.can_add_songs)
     };
+    context.db.prepare("UPDATE users SET last_login_at = datetime('now') WHERE id = ?").run(user.id);
     await issueSession(reply, user);
     return { user };
   });
@@ -196,8 +202,8 @@ export async function buildApp(context: AppContext) {
     const passwordHash = await hashPassword(body.password);
     const user = context.db.transaction(() => {
       const result = context.db.prepare(`
-        INSERT INTO users(username, password_hash, role, is_maintainer, can_add_songs)
-        VALUES (?, ?, 'user', 0, 1)
+        INSERT INTO users(username, password_hash, role, is_maintainer, can_add_songs, last_login_at)
+        VALUES (?, ?, 'user', 0, 1, datetime('now'))
       `).run(body.username, passwordHash);
       const created: UserPayload = { id: Number(result.lastInsertRowid), username: body.username, role: 'user', isMaintainer: false, canAddSongs: true };
       context.db.prepare(`INSERT INTO playlists(owner_id, name, kind) VALUES (?, '下一次 KTV', 'next_ktv')`).run(created.id);
@@ -213,14 +219,119 @@ export async function buildApp(context: AppContext) {
   });
   app.get('/api/auth/me', { preHandler: requireUser }, async (request) => ({ user: currentUser(request) }));
 
-  /** 管理员用户管理保持最小闭环：创建账号、授予曲库管家、控制添加权限和重置密码。 */
-  app.get('/api/admin/users', { preHandler: requireAdmin }, async () => ({
-    users: (context.db.prepare(`
+  /**
+   * 用户列表的筛选和分页全部在 SQLite 中完成，避免大量账号一次性传到移动端。
+   * “曲库管家”仍是普通用户的权限状态，不扩展数据库 role 枚举。
+   */
+  app.get('/api/admin/users', { preHandler: requireAdmin }, async (request) => {
+    const query = adminUsersQuerySchema.parse(request.query);
+    const params = { term: `%${query.q}%`, limit: query.limit, offset: query.offset };
+    const clauses = ['is_system = 0', query.q ? 'username LIKE @term' : '1 = 1'];
+    if (query.type === 'admin') clauses.push("role = 'admin'");
+    if (query.type === 'maintainer') clauses.push("role = 'user' AND is_maintainer = 1");
+    if (query.type === 'user') clauses.push("role = 'user' AND is_maintainer = 0");
+    if (query.canAddSongs === 'allowed') clauses.push('can_add_songs = 1');
+    if (query.canAddSongs === 'denied') clauses.push('can_add_songs = 0');
+    if (query.login === 'logged') clauses.push('last_login_at IS NOT NULL');
+    if (query.login === 'never') clauses.push('last_login_at IS NULL');
+    const where = clauses.join(' AND ');
+    const order = {
+      created_desc: 'created_at DESC, id DESC',
+      username_asc: 'username COLLATE NOCASE, id',
+      last_login_desc: 'last_login_at IS NULL, last_login_at DESC, id DESC'
+    }[query.sort];
+    const users = (context.db.prepare(`
       SELECT id, username, role, is_maintainer AS isMaintainer, can_add_songs AS canAddSongs,
-             created_at AS createdAt
-      FROM users ORDER BY role = 'admin' DESC, created_at, username COLLATE NOCASE
-    `).all() as any[]).map((user) => ({ ...user, isMaintainer: Boolean(user.isMaintainer), canAddSongs: Boolean(user.canAddSongs) }))
-  }));
+        created_at AS createdAt, last_login_at AS lastLoginAt,
+        (SELECT count(*) FROM user_songs us WHERE us.user_id = users.id AND us.removed_at IS NULL) AS personalSongCount
+      FROM users WHERE ${where} ORDER BY ${order} LIMIT @limit OFFSET @offset
+    `).all(params) as any[]).map(normalizeAdminUser);
+    const total = (context.db.prepare(`SELECT count(*) AS count FROM users WHERE ${where}`).get(params) as { count: number }).count;
+    const summary = context.db.prepare(`
+      SELECT count(*) AS total,
+        sum(CASE WHEN role = 'user' AND is_maintainer = 1 THEN 1 ELSE 0 END) AS maintainers,
+        sum(CASE WHEN can_add_songs = 0 THEN 1 ELSE 0 END) AS addSongsDenied,
+        sum(CASE WHEN last_login_at IS NULL THEN 1 ELSE 0 END) AS neverLoggedIn
+      FROM users WHERE is_system = 0
+    `).get() as any;
+    return { users, total, hasMore: query.offset + users.length < total, summary: {
+      total: Number(summary.total ?? 0), maintainers: Number(summary.maintainers ?? 0),
+      addSongsDenied: Number(summary.addSongsDenied ?? 0), neverLoggedIn: Number(summary.neverLoggedIn ?? 0)
+    } };
+  });
+
+  app.get('/api/admin/users/:id', { preHandler: requireAdmin }, async (request, reply) => {
+    const { id } = idParamSchema.parse(request.params);
+    const row = context.db.prepare(`
+      SELECT u.id, u.username, u.role, u.is_maintainer AS isMaintainer, u.can_add_songs AS canAddSongs,
+        u.created_at AS createdAt, u.last_login_at AS lastLoginAt,
+        (SELECT count(*) FROM user_songs us WHERE us.user_id = u.id AND us.removed_at IS NULL) AS personalSongCount,
+        (SELECT count(*) FROM user_songs us WHERE us.user_id = u.id AND us.removed_at IS NULL AND us.collection_type = 'repertoire') AS repertoireCount,
+        (SELECT count(*) FROM user_songs us WHERE us.user_id = u.id AND us.removed_at IS NULL AND us.collection_type = 'learning') AS learningCount,
+        (SELECT count(*) FROM plays p WHERE p.user_id = u.id) AS playCount,
+        (SELECT count(*) FROM playlists p WHERE p.owner_id = u.id) AS playlistCount,
+        (SELECT count(*) FROM pick_sessions ps WHERE ps.user_id = u.id) AS pickSessionCount,
+        (SELECT count(*) FROM songs s WHERE s.added_by = u.id) AS contributedSongCount
+      FROM users u WHERE u.id = ? AND u.is_system = 0
+    `).get(id) as any;
+    if (!row) return reply.code(404).send({ code: 'NOT_FOUND', message: '没有找到这个用户。' });
+    return { user: { ...normalizeAdminUser(row), repertoireCount: row.repertoireCount, learningCount: row.learningCount,
+      playCount: row.playCount, playlistCount: row.playlistCount, pickSessionCount: row.pickSessionCount,
+      contributedSongCount: row.contributedSongCount } };
+  });
+
+  const validateDeletionTargets = (actorId: number, userIds: number[]) => {
+    const placeholders = userIds.map(() => '?').join(', ');
+    const rows = context.db.prepare(`SELECT id, username, role, is_system AS isSystem FROM users WHERE id IN (${placeholders})`).all(...userIds) as Array<{ id: number; username: string; role: string; isSystem: number }>;
+    if (rows.length !== userIds.length) return { status: 404, code: 'USER_NOT_FOUND', message: '待删除用户中包含不存在的账号。' } as const;
+    if (rows.some((row) => row.id === actorId)) return { status: 409, code: 'CANNOT_DELETE_SELF', message: '不能删除当前登录的管理员账号。' } as const;
+    if (rows.some((row) => row.role === 'admin' || row.isSystem)) return { status: 409, code: 'PROTECTED_USER', message: '管理员或系统内部账号不能删除。' } as const;
+    return { rows };
+  };
+
+  const deletionImpact = (userIds: number[]) => {
+    const values = userIds.map(() => '(?)').join(', ');
+    const impact = context.db.prepare(`
+      WITH target_ids(id) AS (VALUES ${values})
+      SELECT
+        (SELECT count(*) FROM users u JOIN target_ids t ON t.id = u.id) AS userCount,
+        (SELECT count(*) FROM user_songs us JOIN target_ids t ON t.id = us.user_id) AS personalSongCount,
+        (SELECT count(*) FROM plays p JOIN target_ids t ON t.id = p.user_id) AS playCount,
+        (SELECT count(*) FROM playlists p JOIN target_ids t ON t.id = p.owner_id) AS playlistCount,
+        (SELECT count(*) FROM pick_sessions ps JOIN target_ids t ON t.id = ps.user_id) AS pickSessionCount,
+        (SELECT count(*) FROM songs s JOIN target_ids t ON t.id = s.added_by) AS contributedSongCount
+    `).get(...userIds) as any;
+    const usernames = (context.db.prepare(`SELECT username FROM users WHERE id IN (${userIds.map(() => '?').join(', ')}) ORDER BY username COLLATE NOCASE`).all(...userIds) as Array<{ username: string }>).map((row) => row.username);
+    return { userCount: Number(impact.userCount), usernames, personalSongCount: Number(impact.personalSongCount),
+      playCount: Number(impact.playCount), playlistCount: Number(impact.playlistCount),
+      pickSessionCount: Number(impact.pickSessionCount), contributedSongCount: Number(impact.contributedSongCount) };
+  };
+
+  /**
+   * 永久删除只清除个人数据；全局歌曲与协作邀请先转给隐藏归属账号，再级联删除用户数据。
+   * 校验与写入位于同一事务边界，任一步骤失败都会完整回滚。
+   */
+  const permanentlyDeleteUsers = async (actor: UserPayload, userIds: number[], adminPassword: string) => {
+    const actorRow = context.db.prepare("SELECT password_hash AS passwordHash FROM users WHERE id = ? AND role = 'admin' AND is_system = 0").get(actor.id) as { passwordHash: string } | undefined;
+    if (!actorRow || !(await verifyPassword(adminPassword, actorRow.passwordHash))) return { error: { status: 403, code: 'INVALID_ADMIN_PASSWORD', message: '管理员密码不正确，未执行删除。' } } as const;
+    const checked = validateDeletionTargets(actor.id, userIds);
+    if ('status' in checked) return { error: checked } as const;
+    const impact = deletionImpact(userIds);
+    context.db.transaction(() => {
+      let systemOwner = context.db.prepare('SELECT id FROM users WHERE is_system = 1 LIMIT 1').get() as { id: number } | undefined;
+      if (!systemOwner) {
+        const result = context.db.prepare(`INSERT INTO users(username, password_hash, role, is_maintainer, can_add_songs, is_system) VALUES (?, '!', 'user', 0, 0, 1)`).run(`__picknext_deleted_owner_${randomUUID()}`);
+        systemOwner = { id: Number(result.lastInsertRowid) };
+      }
+      const placeholders = userIds.map(() => '?').join(', ');
+      context.db.prepare(`UPDATE songs SET added_by = ? WHERE added_by IN (${placeholders})`).run(systemOwner.id, ...userIds);
+      context.db.prepare(`UPDATE playlist_collaborators SET invited_by = ? WHERE invited_by IN (${placeholders})`).run(systemOwner.id, ...userIds);
+      context.db.prepare(`UPDATE song_submissions SET reviewed_by = NULL WHERE reviewed_by IN (${placeholders})`).run(...userIds);
+      const removed = context.db.prepare(`DELETE FROM users WHERE id IN (${placeholders})`).run(...userIds);
+      if (removed.changes !== userIds.length) throw new Error('永久删除用户时目标数量发生变化，事务已回滚。');
+    })();
+    return { impact } as const;
+  };
 
   app.post('/api/admin/users', { preHandler: requireAdmin }, async (request, reply) => {
     const body = adminCreateUserSchema.parse(request.body);
@@ -239,10 +350,39 @@ export async function buildApp(context: AppContext) {
     return reply.code(201).send({ userId });
   });
 
+  app.put('/api/admin/users/bulk-permissions', { preHandler: requireAdmin }, async (request, reply) => {
+    const body = adminBulkPermissionsSchema.parse(request.body);
+    const placeholders = body.userIds.map(() => '?').join(', ');
+    const targets = context.db.prepare(`SELECT id, role, is_system AS isSystem FROM users WHERE id IN (${placeholders})`).all(...body.userIds) as Array<{ id: number; role: string; isSystem: number }>;
+    if (targets.length !== body.userIds.length) return reply.code(404).send({ code: 'USER_NOT_FOUND', message: '所选用户中包含不存在的账号。' });
+    if (targets.some((target) => target.role === 'admin' || target.isSystem)) return reply.code(409).send({ code: 'PROTECTED_USER', message: '不能批量修改管理员或系统账号。' });
+    const result = context.db.prepare(`UPDATE users SET is_maintainer = coalesce(?, is_maintainer), can_add_songs = coalesce(?, can_add_songs) WHERE id IN (${placeholders})`).run(
+      body.isMaintainer === undefined ? null : body.isMaintainer ? 1 : 0,
+      body.canAddSongs === undefined ? null : body.canAddSongs ? 1 : 0,
+      ...body.userIds
+    );
+    return { ok: true, updated: result.changes };
+  });
+
+  app.post('/api/admin/users/deletion-preview', { preHandler: requireAdmin }, async (request, reply) => {
+    const actor = currentUser(request);
+    const body = adminDeletionPreviewSchema.parse(request.body);
+    const checked = validateDeletionTargets(actor.id, body.userIds);
+    if ('status' in checked) return reply.code(checked.status).send({ code: checked.code, message: checked.message });
+    return { impact: deletionImpact(body.userIds) };
+  });
+
+  app.post('/api/admin/users/bulk-delete', { preHandler: requireAdmin }, async (request, reply) => {
+    const body = adminBulkDeletionSchema.parse(request.body);
+    const result = await permanentlyDeleteUsers(currentUser(request), body.userIds, body.adminPassword);
+    if ('error' in result) return reply.code(result.error.status as 403 | 404 | 409).send({ code: result.error.code, message: result.error.message });
+    return { ok: true, deleted: result.impact.userCount, impact: result.impact };
+  });
+
   app.put('/api/admin/users/:id', { preHandler: requireAdmin }, async (request, reply) => {
     const { id } = idParamSchema.parse(request.params);
     const body = adminUpdateUserSchema.parse(request.body);
-    const target = context.db.prepare('SELECT role FROM users WHERE id = ?').get(id) as { role: string } | undefined;
+    const target = context.db.prepare('SELECT role FROM users WHERE id = ? AND is_system = 0').get(id) as { role: string } | undefined;
     if (!target) return reply.code(404).send({ code: 'NOT_FOUND', message: '没有找到这个用户。' });
     if (target.role === 'admin') return reply.code(409).send({ code: 'ADMIN_LOCKED', message: '管理员账号的权限不能在这里降级。' });
     context.db.prepare(`
@@ -256,9 +396,17 @@ export async function buildApp(context: AppContext) {
   app.put('/api/admin/users/:id/password', { preHandler: requireAdmin }, async (request, reply) => {
     const { id } = idParamSchema.parse(request.params);
     const body = adminResetPasswordSchema.parse(request.body);
-    const result = context.db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(await hashPassword(body.password), id);
+    const result = context.db.prepare('UPDATE users SET password_hash = ? WHERE id = ? AND is_system = 0').run(await hashPassword(body.password), id);
     if (!result.changes) return reply.code(404).send({ code: 'NOT_FOUND', message: '没有找到这个用户。' });
     return { ok: true };
+  });
+
+  app.delete('/api/admin/users/:id', { preHandler: requireAdmin }, async (request, reply) => {
+    const { id } = idParamSchema.parse(request.params);
+    const body = adminDeletionSchema.parse(request.body);
+    const result = await permanentlyDeleteUsers(currentUser(request), [id], body.adminPassword);
+    if ('error' in result) return reply.code(result.error.status as 403 | 404 | 409).send({ code: result.error.code, message: result.error.message });
+    return { ok: true, deleted: 1, impact: result.impact };
   });
 
   app.get('/api/admin/settings', { preHandler: requireAdmin }, async () => ({
@@ -887,7 +1035,8 @@ export async function buildApp(context: AppContext) {
     const user = currentUser(request);
     const query = z.object({ q: z.string().trim().max(40).default('') }).parse(request.query);
     return { users: context.db.prepare(`
-      SELECT id, username FROM users WHERE id <> @userId AND (@query = '' OR username LIKE @term)
+      SELECT id, username FROM users WHERE id <> @userId AND is_system = 0
+        AND (@query = '' OR username LIKE @term)
       ORDER BY username COLLATE NOCASE LIMIT 20
     `).all({ userId: user.id, query: query.q, term: `%${query.q}%` }) };
   });
@@ -1166,6 +1315,20 @@ export async function buildApp(context: AppContext) {
 }
 
 interface ImportEntry { title: string; artist: string; version?: string | undefined }
+
+/**
+ * SQLite 用 0/1 保存布尔值。管理接口在统一出口完成类型归一化，避免各页面
+ * 分别猜测数据库驱动的返回形式；同时把聚合查询可能返回的空值收敛为稳定值。
+ */
+function normalizeAdminUser(user: any) {
+  return {
+    ...user,
+    isMaintainer: Boolean(user.isMaintainer),
+    canAddSongs: Boolean(user.canAddSongs),
+    personalSongCount: Number(user.personalSongCount ?? 0),
+    lastLoginAt: user.lastLoginAt ?? null
+  };
+}
 
 function parseImport(format: 'json' | 'csv' | 'text', content: string): ImportEntry[] {
   if (format === 'json') {

@@ -94,6 +94,8 @@ final_weight = recency_weight × artist_factor × genre_factor × difficulty_fac
 ## 5. v1.0 范围
 
 - 初始化管理员、登录和账号会话；管理员可控制开放注册，普通用户注册成功后直接登录。
+- 用户管理使用独立移动端页面，支持服务端搜索、角色/权限/登录状态筛选、稳定排序、每页 30 人加载、多选及最多 50 人的批量权限操作。
+- 管理员可永久删除普通用户和曲库管家，但不能删除自己、其他管理员或内部账号；删除前必须重新验证当前管理员密码并确认不可恢复风险。
 - 会唱曲库、待学清单、两者转换及冷藏。
 - 标题、歌手、版本、歌词、音译、别名、拼音、个人备注和记忆词搜索；曲库支持语种、曲风、个人/参考难度、星级和快捷场景筛选。
 - 曲库按歌名拼音分组排序，移动端通过右侧 A–Z/# 索引快速定位；曲库筛选不影响 Pick 筛选。
@@ -109,7 +111,7 @@ final_weight = recency_weight × artist_factor × genre_factor × difficulty_fac
 
 - 添加歌曲：新增全局歌曲并收录到会唱曲库或待学清单。
 - 维护歌曲：管理员和曲库管家维护全局公共资料；个人评分、难度、调号和备注只影响当前用户。
-- 多用户权限：首次初始化管理员；管理员创建账号、开放或关闭普通用户注册，并分配添加歌曲与曲库维护权限。
+- 多用户权限：首次初始化管理员；管理员创建账号、开放或关闭普通用户注册，并分配添加歌曲与曲库维护权限；删除账号时清除其个人数据，全局歌曲转为“已删除用户”匿名归属并继续保留。
 - Pick：下一次 KTV 优先抽取，跨页面保留当前歌曲，再次点击 Pick 才切歌；支持歌词跟唱、首次唱完评分、自动移出 KTV 和历史记录。
 - 恢复与引导：四小时内的活动场次以服务端状态为准恢复；会唱曲库为空时解释会唱、待学和下一次 KTV，并直达全部曲库。
 - 弱网边界：静态应用外壳可离线打开，API 不离线缓存；请求 15 秒超时，写操作不自动重试，断网期间保留已加载的当前歌曲和歌词。
@@ -134,6 +136,8 @@ final_weight = recency_weight × artist_factor × genre_factor × difficulty_fac
 - `GET/POST/PATCH/DELETE /api/playlists/*`、`PUT/DELETE /api/playlists/:id/collaborators/:userId`
 - `GET /api/history`、`GET /api/users/search`
 - `GET /api/reviews`、`GET /api/reviews/count`、`POST /api/reviews/:id/merge|approve|reject`
+- `GET /api/admin/users`、`GET /api/admin/users/:id`、`PUT /api/admin/users/bulk-permissions`
+- `POST /api/admin/users/deletion-preview`、`DELETE /api/admin/users/:id`、`POST /api/admin/users/bulk-delete`
 
 所有请求与响应使用共享 Zod Schema 校验。Pick 响应包含来源、场次与事件 ID、候选数量、原因、是否放宽近期和算法版本。
 Pick 上下文响应包含活动场次、当前歌曲、筛选快照、会唱/全局/KTV 数量和当前用户会唱曲库的筛选项。
@@ -150,5 +154,7 @@ Pick 上下文响应包含活动场次、当前歌曲、筛选快照、会唱/�
 - 离线和超时错误必须说明保存是否成功；敏感 API 数据不得写入 Service Worker 缓存。
 - 1000 首候选生成目标小于 100ms。
 - 曲库字母索引的分组数量和起始偏移必须基于完整筛选结果，不能只计算当前分页；个人筛选数据不得泄露给其他用户。
+- 1000 名用户时管理页首屏只返回并渲染 30 人；筛选、排序和批量操作作用于服务端完整数据集。
+- 永久删除必须整批事务执行：任一目标无效时全部回滚；个人数据被清除，贡献的全局歌曲仍可搜索、收录和 Pick，原账号及旧会话立即失效。
 - 关键类与 Pick 算法使用中文注释；用户错误和部署日志提供清晰中文信息。
 - 发布前通过 `pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build`。

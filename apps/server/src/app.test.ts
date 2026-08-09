@@ -264,6 +264,66 @@ describe('核心 API 纵向闭环', () => {
     expect((await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'new-singer', password: 'changed123' } })).statusCode).toBe(200);
   });
 
+  it('用户管理对完整数据执行分页、筛选、排序和批量权限更新', async () => {
+    const adminCookie = await setup();
+    const insert = database.db.prepare(`
+      INSERT INTO users(username, password_hash, role, is_maintainer, can_add_songs, last_login_at)
+      VALUES (?, '不可登录测试哈希', 'user', ?, ?, ?)
+    `);
+    const ids: number[] = [];
+    for (let index = 0; index < 1000; index += 1) {
+      ids.push(Number(insert.run(`user-${String(index).padStart(3, '0')}`, index % 5 === 0 ? 1 : 0, index % 4 === 0 ? 0 : 1, index % 3 === 0 ? '2026-08-01 12:00:00' : null).lastInsertRowid));
+    }
+
+    const firstPage = await app.inject({ method: 'GET', url: '/api/admin/users?type=user&limit=30&sort=username_asc', headers: { cookie: adminCookie } });
+    expect(firstPage.statusCode).toBe(200);
+    expect(firstPage.json()).toMatchObject({ total: 800, hasMore: true });
+    expect(firstPage.json().users).toHaveLength(30);
+    expect(firstPage.json().users[0].username).toBe('user-001');
+    const never = await app.inject({ method: 'GET', url: '/api/admin/users?type=maintainer&login=never&limit=100', headers: { cookie: adminCookie } });
+    expect(never.json().users.every((user: any) => user.isMaintainer && user.lastLoginAt === null)).toBe(true);
+
+    const bulk = await app.inject({ method: 'PUT', url: '/api/admin/users/bulk-permissions', headers: { cookie: adminCookie }, payload: { userIds: ids.slice(0, 3), canAddSongs: false, isMaintainer: true } });
+    expect(bulk.json()).toMatchObject({ ok: true, updated: 3 });
+    const updated = database.db.prepare(`SELECT count(*) AS count FROM users WHERE id IN (?, ?, ?) AND can_add_songs = 0 AND is_maintainer = 1`).get(...ids.slice(0, 3)) as { count: number };
+    expect(updated.count).toBe(3);
+  });
+
+  it('永久删除整批回滚受保护目标，并在成功后匿名保留全局歌曲', async () => {
+    const adminCookie = await setup();
+    const createUser = async (username: string) => {
+      const created = await app.inject({ method: 'POST', url: '/api/admin/users', headers: { cookie: adminCookie }, payload: { username, password: 'password123', canAddSongs: true } });
+      const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username, password: 'password123' } });
+      const header = login.headers['set-cookie'];
+      return { id: created.json().userId as number, cookie: (Array.isArray(header) ? header[0] : header)!.split(';')[0]! };
+    };
+    const first = await createUser('delete-first');
+    const second = await createUser('delete-second');
+    const song = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie: first.cookie }, payload: { title: '匿名保留歌曲', artist: '测试歌手', collectionType: 'repertoire' } });
+    database.db.prepare('INSERT INTO plays(user_id, song_id, note) VALUES (?, ?, ?)').run(first.id, song.json().songId, '待删除记录');
+
+    const preview = await app.inject({ method: 'POST', url: '/api/admin/users/deletion-preview', headers: { cookie: adminCookie }, payload: { userIds: [first.id, second.id] } });
+    expect(preview.json().impact).toMatchObject({ userCount: 2, personalSongCount: 1, playCount: 1, contributedSongCount: 1 });
+    const wrongPassword = await app.inject({ method: 'POST', url: '/api/admin/users/bulk-delete', headers: { cookie: adminCookie }, payload: { userIds: [first.id, second.id], adminPassword: 'wrong-pass', confirmed: true } });
+    expect(wrongPassword.statusCode).toBe(403);
+    expect((database.db.prepare('SELECT count(*) AS count FROM users WHERE id IN (?, ?)').get(first.id, second.id) as { count: number }).count).toBe(2);
+
+    const adminId = (database.db.prepare("SELECT id FROM users WHERE username = 'singer'").get() as { id: number }).id;
+    const protectedBatch = await app.inject({ method: 'POST', url: '/api/admin/users/bulk-delete', headers: { cookie: adminCookie }, payload: { userIds: [first.id, adminId], adminPassword: 'password123', confirmed: true } });
+    expect(protectedBatch.statusCode).toBe(409);
+    expect(database.db.prepare('SELECT id FROM users WHERE id = ?').get(first.id)).toBeTruthy();
+
+    const removed = await app.inject({ method: 'POST', url: '/api/admin/users/bulk-delete', headers: { cookie: adminCookie }, payload: { userIds: [first.id, second.id], adminPassword: 'password123', confirmed: true } });
+    expect(removed.json()).toMatchObject({ ok: true, deleted: 2 });
+    expect((database.db.prepare('SELECT count(*) AS count FROM users WHERE id IN (?, ?)').get(first.id, second.id) as { count: number }).count).toBe(0);
+    expect((database.db.prepare('SELECT count(*) AS count FROM users WHERE is_system = 1').get() as { count: number }).count).toBe(1);
+    expect(database.db.prepare('SELECT id FROM songs WHERE id = ?').get(song.json().songId)).toBeTruthy();
+    expect((database.db.prepare('SELECT count(*) AS count FROM plays WHERE user_id = ?').get(first.id) as { count: number }).count).toBe(0);
+    expect((await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie: first.cookie } })).statusCode).toBe(401);
+    const global = await app.inject({ method: 'GET', url: '/api/search?scope=global&q=匿名保留歌曲', headers: { cookie: adminCookie } });
+    expect(global.json().songs[0]).toMatchObject({ title: '匿名保留歌曲' });
+  });
+
   it('下一次 KTV 支持加入、逐首移除和清空', async () => {
     const cookie = await setup();
     const first = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie }, payload: { title: '第一首', artist: '甲', collectionType: 'repertoire' } });

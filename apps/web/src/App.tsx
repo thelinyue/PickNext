@@ -6,6 +6,7 @@ import { AppShell, NetworkBanner, Toast, type NavigationPage, type PickNavState 
 import { LibraryPage } from './library.js';
 import { PickPage, usePickController } from './pick.js';
 import { MePage } from './me.js';
+import { AdminUsersPage } from './admin-users.js';
 
 interface User { id: number; username: string; role: 'admin' | 'user'; isMaintainer: boolean; canAddSongs: boolean }
 
@@ -21,6 +22,14 @@ export default function App() {
   const pickController = usePickController(notify, Boolean(me.data?.user));
   const navigate = useCallback((target: NavigationPage) => { if (target === 'library') setLibraryScope('personal'); setPage(target); }, []);
   const openGlobalLibrary = useCallback(() => { setLibraryScope('global'); setPage('library'); }, []);
+  const openAdminUsers = useCallback(() => {
+    history.pushState({ page: 'admin-users' }, '');
+    setPage('admin-users');
+  }, []);
+  const closeAdminUsers = useCallback(() => {
+    if (history.state?.page === 'admin-users') history.back();
+    else setPage('me');
+  }, []);
   const pickState: PickNavState = pickController.busy || pickController.initializing
     ? 'loading'
     : pickController.exhausted || pickController.ktvExhausted
@@ -52,9 +61,14 @@ export default function App() {
     window.addEventListener('online', handleOnline);
     return () => { window.removeEventListener('offline', handleOffline); window.removeEventListener('online', handleOnline); };
   }, [client, notify]);
+  useEffect(() => {
+    const handlePopState = () => setPage((current) => current === 'admin-users' ? 'me' : current);
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
   if (setup.isLoading || (setup.data?.required === false && me.isLoading)) return <div className="splash"><div className="brand-pulse">🎙️</div><span>PickNext</span></div>;
   if (setup.isError) return <div className="fatal"><span>{setup.error instanceof Error ? setup.error.message : '无法连接 PickNext 服务。'}</span><button className="button" onClick={() => void setup.refetch()}>重新连接</button></div>;
   if (setup.data?.required || me.error instanceof ApiError && me.error.status === 401) return <AuthScreen setupRequired={Boolean(setup.data?.required)} registrationOpen={Boolean(setup.data?.registrationOpen)} onSuccess={refreshAuth} />;
   if (!me.data?.user) return <div className="fatal"><span>{me.error instanceof Error ? me.error.message : '读取账号信息失败。'}</span><button className="button" onClick={() => void me.refetch()}>重新连接</button></div>;
-  return <AppShell page={page} onNavigate={navigate} onPickAction={runPickAction} pickState={pickState}>{!online && <NetworkBanner />}{page === 'library' && <LibraryPage notify={notify} canEditGlobal={me.data.user.role === 'admin' || me.data.user.isMaintainer} initialScope={libraryScope} />}{page === 'pick' && <PickPage notify={notify} controller={pickController} onOpenGlobalLibrary={openGlobalLibrary} canAddSongs={me.data.user.canAddSongs} />}{page === 'me' && <MePage user={me.data.user} notify={notify} onLogout={() => { client.clear(); location.reload(); }} />}<Toast message={toast} /></AppShell>;
+  return <AppShell page={page} onNavigate={navigate} onPickAction={runPickAction} pickState={pickState}>{!online && <NetworkBanner />}{page === 'library' && <LibraryPage notify={notify} canEditGlobal={me.data.user.role === 'admin' || me.data.user.isMaintainer} initialScope={libraryScope} />}{page === 'pick' && <PickPage notify={notify} controller={pickController} onOpenGlobalLibrary={openGlobalLibrary} canAddSongs={me.data.user.canAddSongs} />}{page === 'me' && <MePage user={me.data.user} notify={notify} onManageUsers={openAdminUsers} onLogout={() => { client.clear(); location.reload(); }} />}{page === 'admin-users' && <AdminUsersPage onBack={closeAdminUsers} notify={notify} />}<Toast message={toast} /></AppShell>;
 }

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowDown, ArrowUp, Download, FolderHeart, History, KeyRound, LogOut, Plus, Save, ShieldCheck, Trash2, Upload, UserPlus, Users, X } from 'lucide-react';
-import type { AdminUser, HistoryItem, HistorySummary, PersonalSongListItem, SearchSongsResponse } from '@picknext/shared';
+import { ArrowDown, ArrowUp, Download, FolderHeart, History, LogOut, Plus, Save, ShieldCheck, Trash2, Upload, Users, X } from 'lucide-react';
+import type { HistoryItem, HistorySummary, PersonalSongListItem, SearchSongsResponse } from '@picknext/shared';
 import { api } from './api.js';
 import { BasicSongCard, Button, EmptyState, IconButton, PageHeader, Sheet, SongCard } from './components.js';
 
@@ -14,15 +14,16 @@ function parseHistoryTime(value: string) {
   return new Date(/[zZ]$|[+-]\d{2}:\d{2}$/.test(isoValue) ? isoValue : `${isoValue}Z`);
 }
 
-export function MePage({ user, onLogout, notify }: { user: CurrentUser; onLogout(): void; notify(message: string): void }) {
+export function MePage({ user, onLogout, onManageUsers, notify }: { user: CurrentUser; onLogout(): void; onManageUsers(): void; notify(message: string): void }) {
   const client = useQueryClient();
   const [historyOpen, setHistoryOpen] = useState(false); const [playlistOpen, setPlaylistOpen] = useState(false);
   const [selectedPlaylist, setSelectedPlaylist] = useState<PlaylistSummary | null>(null); const [importOpen, setImportOpen] = useState(false);
-  const [usersOpen, setUsersOpen] = useState(false); const [reviewsOpen, setReviewsOpen] = useState(false);
+  const [reviewsOpen, setReviewsOpen] = useState(false);
   const history = useQuery({ queryKey: ['history-summary'], queryFn: () => api<{ summary: HistorySummary }> (`/api/history?limit=1&timezoneOffset=${new Date().getTimezoneOffset()}`) });
   const playlists = useQuery({ queryKey: ['playlists'], queryFn: () => api<{ playlists: PlaylistSummary[] }>('/api/playlists') });
   const canReview = user.role === 'admin' || user.isMaintainer;
   const reviewCount = useQuery({ queryKey: ['review-count'], enabled: canReview, queryFn: () => api<{ count: number }>('/api/reviews/count') });
+  const userSummary = useQuery({ queryKey: ['admin-users-summary'], enabled: user.role === 'admin', queryFn: () => api<{ summary: { total: number; maintainers: number } }>('/api/admin/users?limit=1') });
   const logout = async () => { await api('/api/auth/logout', { method: 'POST', body: '{}' }); onLogout(); };
   const exportData = async () => {
     const data = await api<object>('/api/export'); const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -32,7 +33,7 @@ export function MePage({ user, onLogout, notify }: { user: CurrentUser; onLogout
     <div className="me-quick-grid"><button onClick={() => setHistoryOpen(true)}><History /><strong>{history.data?.summary.playedToday ?? 0}</strong><span>今日唱</span></button><button onClick={() => setHistoryOpen(true)}><History /><strong>{history.data?.summary.playedTotal ?? 0}</strong><span>累计唱</span></button><button onClick={() => setHistoryOpen(true)}><History /><strong>{history.data?.summary.favoriteArtist ?? '—'}</strong><span>常唱歌手</span></button></div>
     <div className="profile-actions"><Button className="secondary" onClick={() => setImportOpen(true)}><Upload size={18} />批量收歌</Button><Button className="secondary" onClick={exportData}><Download size={18} />导出数据</Button></div>
     {canReview && <button className="admin-entry" onClick={() => setReviewsOpen(true)}><span><ShieldCheck /></span><div><strong>审核中心</strong><small>处理重复歌曲 · 保护全局曲库</small></div><b>{reviewCount.data?.count ?? 0} 待处理 ›</b></button>}
-    {user.role === 'admin' && <button className="admin-entry" onClick={() => setUsersOpen(true)}><span><Users /></span><div><strong>用户与权限</strong><small>创建账号 · 授予曲库管家 · 重置密码</small></div><b>管理 ›</b></button>}
+    {user.role === 'admin' && <button className="admin-entry" onClick={onManageUsers}><span><Users /></span><div><strong>用户与权限</strong><small>{userSummary.data ? `${userSummary.data.summary.total} 位用户 · ${userSummary.data.summary.maintainers} 位曲库管家` : '搜索、批量授权与永久删除'}</small></div><b>管理 ›</b></button>}
     <div className="section-heading"><h2 className="section-title">我的歌单</h2><button onClick={() => setPlaylistOpen(true)}><Plus size={16} />新建</button></div>
     <div className="playlist-grid">{playlists.data?.playlists.map((playlist) => <button key={playlist.id} onClick={() => setSelectedPlaylist(playlist)}><FolderHeart /><strong>{playlist.name}</strong><span>{playlist.songCount} 首 · {playlist.access === 'owner' ? `${playlist.collaboratorCount} 位协作者` : `${playlist.ownerName} 创建`}</span></button>)}</div>
     {!playlists.isLoading && !playlists.data?.playlists.length && <p className="helper">可以新建主题歌单，再邀请朋友一起维护。</p>}
@@ -42,7 +43,6 @@ export function MePage({ user, onLogout, notify }: { user: CurrentUser; onLogout
     <ImportSheet open={importOpen} onOpenChange={setImportOpen} notify={notify} />
     <CreatePlaylistSheet open={playlistOpen} onOpenChange={setPlaylistOpen} notify={notify} onCreated={async () => { await client.invalidateQueries({ queryKey: ['playlists'] }); }} />
     <PlaylistSheet playlist={selectedPlaylist} onClose={() => setSelectedPlaylist(null)} notify={notify} />
-    <UserManagementSheet open={usersOpen} onOpenChange={setUsersOpen} notify={notify} />
     <ReviewCenter open={reviewsOpen} onOpenChange={setReviewsOpen} notify={notify} />
   </section>;
 }
@@ -83,18 +83,6 @@ function ReviewCenter({ open, onOpenChange, notify }: { open: boolean; onOpenCha
   const reviews = useQuery({ queryKey: ['reviews'], enabled: open, queryFn: () => api<{ reviews: any[] }>('/api/reviews?status=pending') });
   const decide = useMutation({ mutationFn: ({ id, action, body = {} }: { id: number; action: 'merge' | 'approve' | 'reject'; body?: object }) => api(`/api/reviews/${id}/${action}`, { method: 'POST', body: JSON.stringify(body) }), onSuccess: async () => { setApproving(null); await Promise.all([client.invalidateQueries({ queryKey: ['reviews'] }), client.invalidateQueries({ queryKey: ['review-count'] }), client.invalidateQueries({ queryKey: ['library-search'] })]); notify('审核已处理'); }, onError: (reason) => notify(reason instanceof Error ? reason.message : '审核处理失败') });
   return <Sheet open={open} onOpenChange={onOpenChange} title="审核中心"><div className="review-list">{reviews.data?.reviews.map((review) => <article className="review-card" key={review.id}><header><strong>「{review.submitted.title}」重复提交</strong><span>{review.submitter}</span></header><div className="review-compare"><div><b>用户提交</b><span>{review.submitted.title}</span><span>{review.submitted.artist}</span><span>{review.submitted.version || '原版'}</span><span>{review.submitted.language || '语种未填'} · {review.submitted.genre || '曲风未填'}</span></div><div><b>曲库已有</b><span>{review.matched?.title}</span><span>{review.matched?.artist}</span><span>{review.matched?.version || '原版'}</span><span>{review.matched?.language || '语种未填'} · {review.matched?.genre || '曲风未填'}</span></div></div>{approving?.id === review.id ? <div className="approve-form"><label>独立版本名称<input value={version} onChange={(event) => setVersion(event.target.value)} placeholder="例如：Live 2025" /></label><div><Button className="secondary" onClick={() => setApproving(null)}>取消</Button><Button disabled={!version.trim()} loading={decide.isPending} onClick={() => decide.mutate({ id: review.id, action: 'approve', body: { ...review.submitted, version } })}>批准独立版本</Button></div></div> : <div className="review-actions"><Button className="secondary" loading={decide.isPending} onClick={() => decide.mutate({ id: review.id, action: 'reject' })}>拒绝</Button><Button className="secondary" onClick={() => { setApproving(review); setVersion(review.submitted.version ?? ''); }}>独立版本</Button><Button loading={decide.isPending} onClick={() => decide.mutate({ id: review.id, action: 'merge' })}>合并复用</Button></div>}</article>)}{!reviews.isLoading && !reviews.data?.reviews.length && <EmptyState title="没有待审核提交" description="重复歌曲处理完成后会从这里移除。" />}</div></Sheet>;
-}
-
-function UserManagementSheet({ open, onOpenChange, notify }: { open: boolean; onOpenChange(open: boolean): void; notify(message: string): void }) {
-  const client = useQueryClient(); const [createOpen, setCreateOpen] = useState(false); const [newUsername, setNewUsername] = useState(''); const [newPassword, setNewPassword] = useState(''); const [newMaintainer, setNewMaintainer] = useState(false); const [resetTarget, setResetTarget] = useState<AdminUser | null>(null); const [resetPassword, setResetPassword] = useState('');
-  const users = useQuery({ queryKey: ['admin-users'], enabled: open, queryFn: () => api<{ users: AdminUser[] }>('/api/admin/users') });
-  const settings = useQuery({ queryKey: ['admin-settings'], enabled: open, queryFn: () => api<{ registrationOpen: boolean }>('/api/admin/settings') });
-  const refresh = () => client.invalidateQueries({ queryKey: ['admin-users'] });
-  const createUser = useMutation({ mutationFn: () => api('/api/admin/users', { method: 'POST', body: JSON.stringify({ username: newUsername, password: newPassword, isMaintainer: newMaintainer, canAddSongs: true }) }), onSuccess: async () => { setNewUsername(''); setNewPassword(''); setNewMaintainer(false); setCreateOpen(false); await refresh(); notify('账号已创建'); } });
-  const updateUser = useMutation({ mutationFn: ({ id, body }: { id: number; body: { isMaintainer?: boolean; canAddSongs?: boolean } }) => api(`/api/admin/users/${id}`, { method: 'PUT', body: JSON.stringify(body) }), onSuccess: refresh });
-  const reset = useMutation({ mutationFn: () => api(`/api/admin/users/${resetTarget!.id}/password`, { method: 'PUT', body: JSON.stringify({ password: resetPassword }) }), onSuccess: () => { setResetTarget(null); setResetPassword(''); notify('密码已重置'); } });
-  const updateRegistration = useMutation({ mutationFn: (value: boolean) => api('/api/admin/settings/registration', { method: 'PUT', body: JSON.stringify({ open: value }) }), onSuccess: () => client.invalidateQueries({ queryKey: ['admin-settings'] }) });
-  return <Sheet open={open} onOpenChange={onOpenChange} title="用户与权限"><div className="sheet-stack"><label className="registration-setting"><span><strong>开放用户注册</strong><small>关闭时只能由管理员创建账号</small></span><input aria-label="开放用户注册" type="checkbox" checked={settings.data?.registrationOpen ?? false} onChange={(event) => updateRegistration.mutate(event.target.checked)} /></label><Button className="secondary" onClick={() => setCreateOpen((value) => !value)}><UserPlus />{createOpen ? '取消新增' : '新增用户'}</Button>{createOpen && <div className="admin-user-form"><label>用户名<input placeholder="用户名" value={newUsername} onChange={(event) => setNewUsername(event.target.value)} /></label><label>初始密码<input type="password" placeholder="至少8位密码" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></label><label className="check-row"><input type="checkbox" checked={newMaintainer} onChange={(event) => setNewMaintainer(event.target.checked)} />创建为曲库管家</label><Button disabled={newUsername.trim().length < 2 || newPassword.length < 8} loading={createUser.isPending} onClick={() => createUser.mutate()}>创建账号</Button></div>}<div className="admin-user-list">{users.data?.users.map((item) => <div className="admin-user-row" key={item.id}><div className="admin-user-head"><strong>{item.username}</strong><span className={`role-badge ${item.role === 'admin' ? 'admin' : item.isMaintainer ? 'maintainer' : 'user'}`}>{item.role === 'admin' ? '管理员' : item.isMaintainer ? '曲库管家' : '普通用户'}</span></div>{item.role !== 'admin' && <div className="admin-user-actions"><button onClick={() => updateUser.mutate({ id: item.id, body: { isMaintainer: !item.isMaintainer } })}>{item.isMaintainer ? '降为普通用户' : '授予曲库管家'}</button><label><input type="checkbox" checked={item.canAddSongs} onChange={(event) => updateUser.mutate({ id: item.id, body: { canAddSongs: event.target.checked } })} />允许添加歌曲</label><button onClick={() => setResetTarget(item)}><KeyRound />重置密码</button></div>}{resetTarget?.id === item.id && <div className="reset-password"><input aria-label={`为${item.username}设置新密码`} type="password" value={resetPassword} onChange={(event) => setResetPassword(event.target.value)} placeholder="新密码" /><Button disabled={resetPassword.length < 8} loading={reset.isPending} onClick={() => reset.mutate()}>确认重置</Button></div>}</div>)}</div></div></Sheet>;
 }
 
 function ImportSheet({ open, onOpenChange, notify }: { open: boolean; onOpenChange(open: boolean): void; notify(message: string): void }) {

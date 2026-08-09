@@ -31,14 +31,22 @@ test.describe.serial('PickNext v1.0 移动端核心闭环', () => {
 
     await page.getByRole('button', { name: '我的' }).click();
     await page.getByRole('button', { name: /用户与权限/ }).click();
-    await page.getByLabel('开放用户注册').click();
-    await expect(page.getByLabel('开放用户注册')).toBeChecked();
+    await page.getByLabel('允许普通用户注册').click();
+    await expect(page.getByLabel('允许普通用户注册')).toBeChecked();
     await page.getByRole('button', { name: '新增用户' }).click();
-    await page.getByLabel('用户名').last().fill('e2e-user');
-    await page.getByLabel('初始密码').fill('e2e-password');
-    await page.getByRole('button', { name: '创建账号' }).click();
+    const createUser = page.getByRole('dialog', { name: '新增用户' });
+    await createUser.getByLabel('用户名').fill('e2e-user');
+    await createUser.getByLabel('初始密码').fill('e2e-password');
+    await createUser.getByRole('button', { name: '创建账号' }).click();
     await expect(page.getByText('e2e-user')).toBeVisible();
-    await page.getByRole('dialog', { name: '用户与权限' }).getByRole('button', { name: '关闭' }).click();
+    await page.getByRole('button', { name: /e2e-user/ }).click();
+    await page.getByRole('dialog', { name: 'e2e-user' }).getByRole('button', { name: '永久删除该用户' }).click();
+    const deleteUser = page.getByRole('dialog', { name: '永久删除用户' });
+    await deleteUser.getByLabel('当前管理员密码').fill('password123');
+    await deleteUser.getByLabel('我了解这些个人数据无法恢复').check();
+    await deleteUser.getByRole('button', { name: '永久删除该用户' }).click();
+    await expect(page.getByText('e2e-user')).toHaveCount(0);
+    await page.getByRole('button', { name: '返回我的页面' }).click();
 
     await page.getByRole('button', { name: '曲库', exact: true }).click();
     await page.locator('header').getByRole('button', { name: '添加歌曲' }).click();

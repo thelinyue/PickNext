@@ -110,7 +110,7 @@ export function NetworkBanner() {
   return <div className="network-banner" role="status">当前处于离线状态；已加载内容仍可查看，新的操作需要恢复网络。</div>;
 }
 
-export type NavigationPage = 'library' | 'pick' | 'me';
+export type NavigationPage = 'library' | 'pick' | 'me' | 'admin-users';
 export type PickNavState = 'idle' | 'continue' | 'switch' | 'loading' | 'exhausted';
 
 const pickNavPresentation = {
@@ -129,10 +129,11 @@ export function AppShell({ page, onNavigate, onPickAction, pickState, children }
   ];
   const pick = pickNavPresentation[pickState];
   const PickIcon = pick.icon;
-  return <div className="app-shell"><main>{children}</main><nav className="bottom-nav" aria-label="主导航"><span className="bottom-nav-surface" aria-hidden="true" />{items.map((item) => {
+  const standalone = page === 'admin-users';
+  return <div className={`app-shell ${standalone ? 'admin-shell' : ''}`}><main>{children}</main>{!standalone && <nav className="bottom-nav" aria-label="主导航"><span className="bottom-nav-surface" aria-hidden="true" />{items.map((item) => {
     const Icon = item.icon;
     return <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => onNavigate(item.id)}><Icon /><span>{item.label}</span></button>;
-  })}<motion.button className={`nav-pick state-${pickState} ${page === 'pick' ? 'active' : ''}`} disabled={pickState === 'loading'} aria-label={pick.accessibleName} aria-busy={pickState === 'loading'} onClick={onPickAction}><span className="nav-pick-orb"><PickIcon /><b>{pick.label}</b></span></motion.button></nav></div>;
+  })}<motion.button className={`nav-pick state-${pickState} ${page === 'pick' ? 'active' : ''}`} disabled={pickState === 'loading'} aria-label={pick.accessibleName} aria-busy={pickState === 'loading'} onClick={onPickAction}><span className="nav-pick-orb"><PickIcon /><b>{pick.label}</b></span></motion.button></nav>}</div>;
 }
 
 export function PageHeader({ eyebrow, title, action }: { eyebrow?: string; title: string; action?: ReactNode }) {
