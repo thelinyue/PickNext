@@ -20,6 +20,7 @@
     "@picknext/shared": "workspace:*",
     "better-sqlite3": "^12.4.1",
     "fastify": "^5.6.2",
+    "pinyin-pro": "^3.28.2",
     "zod": "^4.1.12"
   },
   "devDependencies": {

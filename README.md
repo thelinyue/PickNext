@@ -73,6 +73,8 @@ docker compose up --build
 
 应用地址为 http://localhost:5560，SQLite 数据保存在命名卷 `picknext-data`。镜像使用非 root 用户，内置健康检查；同一 Dockerfile 可用于 amd64 与 arm64 的 buildx 构建。
 
+容器默认使用 `Asia/Shanghai`（东八区）。如需其他时区，在 `.env` 中设置 IANA 时区名，例如 `TZ=UTC` 或 `TZ=America/New_York`，然后重新创建容器。
+
 ## 工程结构
 
 - `apps/server`：Fastify API、SQLite 事务、静态文件托管。

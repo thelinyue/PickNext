@@ -23,10 +23,30 @@ export type PerformanceType = z.infer<typeof performanceTypeSchema>;
 export const songListScopeSchema = z.enum(['personal', 'global']);
 export type SongListScope = z.infer<typeof songListScopeSchema>;
 
+export const librarySceneSchema = z.enum(['all', 'strong', 'challenge', 'recent', 'note', 'new', 'high', 'hard', 'custom']);
+export type LibraryScene = z.infer<typeof librarySceneSchema>;
+
+const csvStringsSchema = z.preprocess((value) => {
+  if (Array.isArray(value)) return value.flatMap((item) => String(item).split(','));
+  if (typeof value === 'string' && value) return value.split(',');
+  return [];
+}, z.array(z.string().trim().min(1)).max(20).default([]));
+
+const csvDifficultiesSchema = z.preprocess((value) => {
+  if (Array.isArray(value)) return value.flatMap((item) => String(item).split(','));
+  if (typeof value === 'string' && value) return value.split(',');
+  return [];
+}, z.array(difficultySchema).max(3).default([]));
+
 export const searchSongsQuerySchema = z.object({
   scope: songListScopeSchema.default('global'),
   collection: collectionTypeSchema.optional(),
   q: z.string().trim().max(200).default(''),
+  languages: csvStringsSchema,
+  genres: csvStringsSchema,
+  difficulties: csvDifficultiesSchema,
+  minRating: z.preprocess((value) => value === '' || value === undefined ? undefined : value, z.coerce.number().int().min(1).max(5).optional()),
+  scene: librarySceneSchema.default('all'),
   limit: z.coerce.number().int().min(1).max(100).default(30),
   offset: z.coerce.number().int().min(0).default(0)
 }).superRefine((value, context) => {
@@ -45,7 +65,8 @@ const songListBaseSchema = z.object({
   version: z.string().nullable(),
   language: z.string().nullable(),
   genre: z.string().nullable(),
-  performanceType: performanceTypeSchema
+  performanceType: performanceTypeSchema,
+  titleInitial: z.string().regex(/^[A-Z#]$/)
 });
 
 export const personalSongListItemSchema = songListBaseSchema.extend({
@@ -86,9 +107,29 @@ export const searchSongsResponseSchema = z.object({
   songs: z.array(songListItemSchema),
   total: z.number().int().nonnegative(),
   hasMore: z.boolean(),
-  counts: songLibraryCountsSchema
+  counts: songLibraryCountsSchema,
+  facets: z.object({ languages: z.array(z.string()), genres: z.array(z.string()) }),
+  alphabetIndex: z.array(z.object({
+    initial: z.string().regex(/^[A-Z#]$/),
+    count: z.number().int().nonnegative(),
+    offset: z.number().int().nonnegative()
+  }))
 });
 export type SearchSongsResponse = z.infer<typeof searchSongsResponseSchema>;
+
+export interface LibraryFilters {
+  languages: string[];
+  genres: string[];
+  difficulties: Difficulty[];
+  minRating?: number;
+  scene: LibraryScene;
+}
+
+export interface AlphabetIndexItem {
+  initial: string;
+  count: number;
+  offset: number;
+}
 
 export const pickFiltersSchema = z.object({
   languages: z.array(z.string().min(1)).max(20).default([]),
@@ -141,6 +182,24 @@ export const pickResponseSchema = z.object({
 });
 export type PickResponse = z.infer<typeof pickResponseSchema>;
 
+export const pickContextResponseSchema = z.object({
+  sessionId: z.string().uuid().nullable(),
+  current: pickResponseSchema.nullable(),
+  filters: pickFiltersSchema,
+  avoidRecent: z.boolean(),
+  ktvExhausted: z.boolean(),
+  counts: z.object({
+    repertoire: z.number().int().nonnegative(),
+    global: z.number().int().nonnegative(),
+    nextKtv: z.number().int().nonnegative()
+  }),
+  facets: z.object({
+    languages: z.array(z.string()),
+    genres: z.array(z.string())
+  })
+});
+export type PickContextResponse = z.infer<typeof pickContextResponseSchema>;
+
 export const createSongSchema = z.object({
   title: z.string().trim().min(1).max(120),
   artist: z.string().trim().min(1).max(120),
@@ -152,11 +211,38 @@ export const createSongSchema = z.object({
   lyrics: z.string().max(200_000).optional(),
   lyricsTranslit: z.string().max(200_000).optional(),
   aliases: z.array(z.string().trim().min(1).max(120)).max(20).default([]),
-  collectionType: collectionTypeSchema.default('learning')
+  collectionType: collectionTypeSchema.default('learning'),
+  personalDifficulty: difficultySchema.nullable().optional(),
+  note: z.string().trim().max(1000).optional(),
+  memoryCue: z.string().trim().max(500).optional(),
+  keyShift: z.number().int().min(-12).max(12).nullable().optional(),
+  duplicateAction: z.enum(['reuse', 'submit_review', 'create_anyway']).optional(),
+  matchedSongId: z.number().int().positive().optional()
 });
+
+/** 全局歌曲公共资料只能由管理员或曲库管家维护，个人评分等数据不进入此结构。 */
+export const updateSongSchema = z.object({
+  title: z.string().trim().min(1).max(120),
+  artist: z.string().trim().min(1).max(120),
+  version: z.string().trim().max(120).nullable().optional(),
+  language: z.string().trim().max(40).nullable().optional(),
+  genre: z.string().trim().max(40).nullable().optional(),
+  difficulty: difficultySchema.nullable().optional(),
+  performanceType: performanceTypeSchema,
+  lyrics: z.string().max(200_000).nullable().optional(),
+  lyricsTranslit: z.string().max(200_000).nullable().optional()
+});
+export type UpdateSong = z.infer<typeof updateSongSchema>;
 
 export const collectionUpdateSchema = z.object({ collectionType: collectionTypeSchema });
 export const snoozeSchema = z.object({ until: z.iso.datetime() });
+export const updateSongUserMetaSchema = z.object({
+  rating: z.number().int().min(1).max(5).nullable().optional(),
+  personalDifficulty: difficultySchema.nullable().optional(),
+  keyShift: z.number().int().min(-12).max(12).nullable().optional(),
+  note: z.string().trim().max(1000).nullable().optional(),
+  memoryCue: z.string().trim().max(500).nullable().optional()
+}).refine((value) => Object.keys(value).length > 0, { message: '至少需要修改一项个人歌曲设置。' });
 export const completePickSchema = z.object({
   requestId: z.string().uuid(),
   rating: z.number().int().min(1).max(5).optional(),
@@ -174,6 +260,7 @@ export const setupSchema = z.object({
   password: z.string().min(8).max(200)
 });
 export const loginSchema = setupSchema;
+export const registrationSettingSchema = z.object({ open: z.boolean() });
 
 export const adminCreateUserSchema = setupSchema.extend({
   isMaintainer: z.boolean().default(false),
@@ -201,3 +288,31 @@ export const importSchema = z.object({
   content: z.string().min(1).max(2_000_000),
   collectionType: collectionTypeSchema.default('learning')
 });
+
+export const createPlaylistSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  collaboratorUserIds: z.array(z.number().int().positive()).max(20).default([])
+});
+export const updatePlaylistSchema = z.object({ name: z.string().trim().min(1).max(80) });
+export const reorderPlaylistSchema = z.object({ songIds: z.array(z.number().int().positive()).max(5000) });
+
+export interface HistoryItem {
+  id: string;
+  songId: number;
+  title: string;
+  artist: string;
+  version: string | null;
+  status: 'played' | 'skipped';
+  occurredAt: string;
+  rating: number | null;
+  note: string | null;
+}
+
+export interface HistorySummary {
+  playedTotal: number;
+  playedToday: number;
+  favoriteArtist: string | null;
+}
+
+export const approveReviewSchema = updateSongSchema.extend({ reviewNote: z.string().trim().max(1000).optional() });
+export const reviewDecisionSchema = z.object({ reviewNote: z.string().trim().max(1000).optional() });

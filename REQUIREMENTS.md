@@ -93,33 +93,50 @@ final_weight = recency_weight × artist_factor × genre_factor × difficulty_fac
 
 ## 5. v1.0 范围
 
-- 初始化管理员、登录和账号会话。
+- 初始化管理员、登录和账号会话；管理员可控制开放注册，普通用户注册成功后直接登录。
 - 会唱曲库、待学清单、两者转换及冷藏。
-- 标题、歌手、版本、歌词、音译、别名、拼音、个人备注和记忆词搜索。
+- 标题、歌手、版本、歌词、音译、别名、拼音、个人备注和记忆词搜索；曲库支持语种、曲风、个人/参考难度、星级和快捷场景筛选。
+- 曲库按歌名拼音分组排序，移动端通过右侧 A–Z/# 索引快速定位；曲库筛选不影响 Pick 筛选。
 - 完整 Pick 队列、筛选、场次、跳过、唱完和历史。
-- 下一次 KTV 与普通歌单。
+- 下一次 KTV 与普通歌单；普通歌单支持协作者共同加歌、移歌和排序，改名、成员管理和删除仅限所有者。
 - 长期把握、个人难度、版本、演唱类型、升降调。
 - LRC 编辑、手动启动/暂停、前后 0.5 秒校正、点击歌词重新对齐和屏幕常亮。
 - 分享捕获、批量粘贴、CSV/JSON 后台导入、个人 JSON 导出。
 - PWA 安装、Docker 部署。
+- 添加歌曲先执行标准化重复检测；精确重复必须复用或提交审核，管理员和曲库管家可合并、批准独立版本或拒绝。
+
+### 5.1 v1.0 核心纵向闭环
+
+- 添加歌曲：新增全局歌曲并收录到会唱曲库或待学清单。
+- 维护歌曲：管理员和曲库管家维护全局公共资料；个人评分、难度、调号和备注只影响当前用户。
+- 多用户权限：首次初始化管理员；管理员创建账号、开放或关闭普通用户注册，并分配添加歌曲与曲库维护权限。
+- Pick：下一次 KTV 优先抽取，跨页面保留当前歌曲，再次点击 Pick 才切歌；支持歌词跟唱、首次唱完评分、自动移出 KTV 和历史记录。
+- 恢复与引导：四小时内的活动场次以服务端状态为准恢复；会唱曲库为空时解释会唱、待学和下一次 KTV，并直达全部曲库。
+- 弱网边界：静态应用外壳可离线打开，API 不离线缓存；请求 15 秒超时，写操作不自动重试，断网期间保留已加载的当前歌曲和歌词。
+- 历史同时展示实际唱完与本场跳过记录，按用户本地日期分组；实际演唱记录继续作为近期排除和久未唱权重依据。
 
 ## 6. v1.1 范围
 
-歌单协作、重复提交审核、删除申请、MTW 候选选择和批量刮削、歌曲版本回退、自动备份和安全恢复。
+删除申请、MTW 候选选择和批量刮削、歌曲版本回退、自动备份和安全恢复。
 
 ## 7. 公共接口
 
 - `POST /api/setup`、`POST /api/auth/login`、`POST /api/auth/logout`、`GET /api/auth/me`
 - `GET/POST /api/songs`、`GET /api/search`
 - `PUT /api/user-songs/:songId/collection`
+- `PATCH /api/user-songs/:songId/meta`
 - `PUT/DELETE /api/user-songs/:songId/snooze`
-- `POST /api/picks`
+- `POST /api/picks`、`GET /api/picks/context`
 - `POST /api/picks/:eventId/complete`
 - `POST /api/picks/:eventId/note`
 - `POST /api/pick-sessions/:id/end`
 - `POST /api/imports`、`GET /api/tasks/:id`、`POST /api/tasks/:id/cancel`
+- `GET/POST/PATCH/DELETE /api/playlists/*`、`PUT/DELETE /api/playlists/:id/collaborators/:userId`
+- `GET /api/history`、`GET /api/users/search`
+- `GET /api/reviews`、`GET /api/reviews/count`、`POST /api/reviews/:id/merge|approve|reject`
 
 所有请求与响应使用共享 Zod Schema 校验。Pick 响应包含来源、场次与事件 ID、候选数量、原因、是否放宽近期和算法版本。
+Pick 上下文响应包含活动场次、当前歌曲、筛选快照、会唱/全局/KTV 数量和当前用户会唱曲库的筛选项。
 
 ## 8. 验收标准
 
@@ -128,6 +145,10 @@ final_weight = recency_weight × artist_factor × genre_factor × difficulty_fac
 - 久未唱概率单调不下降；相邻同歌手比例较纯随机下降但不为零。
 - 单歌手、单曲风、全困难、单候选均正常工作。
 - 同一 `request_id` 不产生重复事件或多次跳过。
+- 刷新或重新打开应用时恢复四小时内的当前 Pick，不产生新事件；超时重试继续使用原 `request_id`。
+- 最后一首下一次 KTV 歌曲唱完后，由用户选择继续会唱曲库或结束本场。
+- 离线和超时错误必须说明保存是否成功；敏感 API 数据不得写入 Service Worker 缓存。
 - 1000 首候选生成目标小于 100ms。
+- 曲库字母索引的分组数量和起始偏移必须基于完整筛选结果，不能只计算当前分页；个人筛选数据不得泄露给其他用户。
 - 关键类与 Pick 算法使用中文注释；用户错误和部署日志提供清晰中文信息。
 - 发布前通过 `pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build`。

@@ -1,11 +1,11 @@
 import type { ButtonHTMLAttributes, PropsWithChildren, ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { BookOpen, Dice5, History, Library, LoaderCircle, Music2, UserRound, X } from 'lucide-react';
+import { BookOpen, Check, Dice5, History, Library, LoaderCircle, Mic2, Music2, RefreshCw, UserRound, X } from 'lucide-react';
 import { motion } from 'motion/react';
 import type { GlobalSongListItem, PersonalSongListItem } from '@picknext/shared';
 
-export function Button({ className = '', children, ...props }: ButtonHTMLAttributes<HTMLButtonElement>) {
-  return <button className={`button ${className}`} {...props}>{props.disabled && <LoaderCircle className="spin" size={18} />}{children}</button>;
+export function Button({ className = '', children, loading = false, disabled, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { loading?: boolean }) {
+  return <button className={`button ${className}`} disabled={disabled || loading} aria-busy={loading || undefined} {...props}>{loading && <LoaderCircle className="spin" size={18} />}{children}</button>;
 }
 
 export function IconButton({ label, children, ...props }: PropsWithChildren<ButtonHTMLAttributes<HTMLButtonElement> & { label: string }>) {
@@ -106,25 +106,33 @@ export function Toast({ message }: { message: string | null }) {
   return <div className={`toast ${message ? 'visible' : ''}`} role="status" aria-live="polite">{message}</div>;
 }
 
+export function NetworkBanner() {
+  return <div className="network-banner" role="status">当前处于离线状态；已加载内容仍可查看，新的操作需要恢复网络。</div>;
+}
+
 export type NavigationPage = 'library' | 'pick' | 'me';
-export function AppShell({ page, onNavigate, pickBusy = false, pickHasCurrent = false, children }: PropsWithChildren<{ page: NavigationPage; onNavigate(page: NavigationPage): void; pickBusy?: boolean; pickHasCurrent?: boolean }>) {
+export type PickNavState = 'idle' | 'continue' | 'switch' | 'loading' | 'exhausted';
+
+const pickNavPresentation = {
+  idle: { label: 'PICK', accessibleName: '开始 Pick', icon: Dice5 },
+  continue: { label: '继续', accessibleName: '返回当前歌曲', icon: Mic2 },
+  switch: { label: '跳过', accessibleName: '跳过这首', icon: RefreshCw },
+  loading: { label: '抽取中', accessibleName: '正在抽取', icon: Dice5 },
+  exhausted: { label: '结束', accessibleName: '处理本场', icon: Check }
+} as const;
+
+/** 底部导航只负责展示明确状态；Pick 的业务动作由应用级控制器统一决定。 */
+export function AppShell({ page, onNavigate, onPickAction, pickState, children }: PropsWithChildren<{ page: NavigationPage; onNavigate(page: NavigationPage): void; onPickAction(): void; pickState: PickNavState }>) {
   const items = [
     { id: 'library' as const, label: '曲库', icon: Library },
-    { id: 'pick' as const, label: 'Pick', icon: Dice5 },
     { id: 'me' as const, label: '我的', icon: UserRound }
   ];
-  return <div className="app-shell"><main>{children}</main><nav className="bottom-nav" aria-label="主导航">{items.map((item) => {
+  const pick = pickNavPresentation[pickState];
+  const PickIcon = pick.icon;
+  return <div className="app-shell"><main>{children}</main><nav className="bottom-nav" aria-label="主导航"><span className="bottom-nav-surface" aria-hidden="true" />{items.map((item) => {
     const Icon = item.icon;
-    if (item.id === 'pick') return <motion.button
-      key={item.id}
-      className={`nav-pick ${page === item.id ? 'active' : ''} ${pickBusy ? 'is-loading' : ''}`}
-      disabled={pickBusy}
-      aria-label={pickBusy ? '正在 Pick' : page === 'pick' && pickHasCurrent ? '换一首' : 'Pick 一首'}
-      onClick={() => onNavigate(item.id)}
-      whileTap={{ scale: .9 }}
-    ><span className="nav-pick-orb"><Icon /><b>PICK</b></span></motion.button>;
     return <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => onNavigate(item.id)}><Icon /><span>{item.label}</span></button>;
-  })}</nav></div>;
+  })}<motion.button className={`nav-pick state-${pickState} ${page === 'pick' ? 'active' : ''}`} disabled={pickState === 'loading'} aria-label={pick.accessibleName} aria-busy={pickState === 'loading'} onClick={onPickAction}><span className="nav-pick-orb"><PickIcon /><b>{pick.label}</b></span></motion.button></nav></div>;
 }
 
 export function PageHeader({ eyebrow, title, action }: { eyebrow?: string; title: string; action?: ReactNode }) {

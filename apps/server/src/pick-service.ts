@@ -7,7 +7,7 @@ import {
   selectCandidatePool,
   type PickCandidate
 } from '@picknext/pick-engine';
-import type { PickRequest, PickResponse, PickSource } from '@picknext/shared';
+import type { PickContextResponse, PickFilters, PickRequest, PickResponse, PickSource } from '@picknext/shared';
 
 interface CandidateRow {
   id: number;
@@ -52,8 +52,114 @@ export class PickError extends Error {
 export class PickService {
   constructor(private readonly db: Database.Database) {}
 
+  /**
+   * 从数据库恢复用户唯一的活动场次，并同时提供 Pick 首页所需的轻量上下文。
+   * 这里不创建新场次，避免用户仅打开页面就污染历史；超过四小时的场次会被统一结束。
+   */
+  getContext(userId: number): PickContextResponse {
+    return this.db.transaction(() => {
+      const expired = this.db.prepare(`
+        SELECT id FROM pick_sessions
+        WHERE user_id = ? AND ended_at IS NULL
+          AND last_activity_at < datetime('now', '-4 hours')
+      `).all(userId) as Array<{ id: string }>;
+      if (expired.length) {
+        const ids = expired.map((item) => item.id);
+        const placeholders = ids.map(() => '?').join(',');
+        this.db.prepare(`UPDATE pick_sessions SET ended_at = datetime('now') WHERE id IN (${placeholders})`).run(...ids);
+        this.db.prepare(`UPDATE pick_queue_items SET status = 'invalidated' WHERE status = 'pending' AND session_id IN (${placeholders})`).run(...ids);
+      }
+
+      const session = this.db.prepare(`
+        SELECT id FROM pick_sessions
+        WHERE user_id = ? AND ended_at IS NULL
+        ORDER BY last_activity_at DESC LIMIT 1
+      `).get(userId) as { id: string } | undefined;
+      if (session) {
+        this.db.prepare(`UPDATE pick_sessions SET ended_at = datetime('now') WHERE user_id = ? AND ended_at IS NULL AND id <> ?`)
+          .run(userId, session.id);
+        this.db.prepare(`
+          UPDATE pick_queue_items SET status = 'invalidated'
+          WHERE status = 'pending' AND session_id IN (
+            SELECT id FROM pick_sessions WHERE user_id = ? AND ended_at IS NOT NULL AND id <> ?
+          )
+        `).run(userId, session.id);
+      }
+
+      const currentRow = session ? this.db.prepare(`
+        SELECT response_json FROM pick_events
+        WHERE session_id = ? AND user_id = ? AND status = 'picked'
+        ORDER BY created_at DESC LIMIT 1
+      `).get(session.id, userId) as { response_json: string } | undefined : undefined;
+      const latestEvent = session ? this.db.prepare(`
+        SELECT source, status, filter_snapshot FROM pick_events
+        WHERE session_id = ? AND user_id = ?
+        ORDER BY created_at DESC LIMIT 1
+      `).get(session.id, userId) as { source: PickSource; status: string; filter_snapshot: string } | undefined : undefined;
+
+      const emptyFilters: PickFilters = { languages: [], genres: [], difficulties: [], ratings: [], performanceTypes: [] };
+      let filters = emptyFilters;
+      let avoidRecent = true;
+      if (latestEvent) {
+        try {
+          const snapshot = JSON.parse(latestEvent.filter_snapshot) as { filters?: PickFilters; avoidRecent?: boolean };
+          filters = snapshot.filters ?? emptyFilters;
+          avoidRecent = snapshot.avoidRecent ?? true;
+        } catch {
+          // 旧版本或手工数据的快照损坏时使用安全默认值，不影响场次恢复。
+        }
+      }
+
+      const counts = this.db.prepare(`
+        SELECT
+          (SELECT count(*) FROM user_songs us JOIN songs s ON s.id = us.song_id
+            WHERE us.user_id = @userId AND us.collection_type = 'repertoire'
+              AND us.removed_at IS NULL AND s.status = 'active') AS repertoire,
+          (SELECT count(*) FROM songs WHERE status = 'active') AS global,
+          (SELECT count(*) FROM playlist_songs ps JOIN playlists p ON p.id = ps.playlist_id
+            JOIN songs s ON s.id = ps.song_id
+            WHERE p.owner_id = @userId AND p.kind = 'next_ktv' AND s.status = 'active') AS nextKtv
+      `).get({ userId }) as { repertoire: number; global: number; nextKtv: number };
+      const facets = this.db.prepare(`
+        SELECT DISTINCT s.language, s.genre
+        FROM user_songs us JOIN songs s ON s.id = us.song_id
+        WHERE us.user_id = ? AND us.collection_type = 'repertoire'
+          AND us.removed_at IS NULL AND s.status = 'active'
+      `).all(userId) as Array<{ language: string | null; genre: string | null }>;
+
+      return {
+        sessionId: session?.id ?? null,
+        current: currentRow ? JSON.parse(currentRow.response_json) as PickResponse : null,
+        filters,
+        avoidRecent,
+        ktvExhausted: Boolean(session && !currentRow && latestEvent?.source === 'ktv' && counts.nextKtv === 0),
+        counts,
+        facets: {
+          languages: [...new Set(facets.map((item) => item.language).filter((value): value is string => Boolean(value)))].sort(),
+          genres: [...new Set(facets.map((item) => item.genre).filter((value): value is string => Boolean(value)))].sort()
+        }
+      };
+    })();
+  }
+
   pick(userId: number, input: PickRequest): PickResponse {
-    return this.db.transaction(() => this.pickInTransaction(userId, input))();
+    try {
+      return this.db.transaction(() => this.pickInTransaction(userId, input))();
+    } catch (reason) {
+      const code = reason && typeof reason === 'object' && 'code' in reason ? String(reason.code) : null;
+      if (code === 'NO_CANDIDATES' && input.sessionId && input.currentEventId) {
+        /**
+         * “跳过最后一首”没有下一首可返回，但跳过本身仍是有效操作。
+         * 主事务因 NO_CANDIDATES 回滚后，在独立事务中只落跳过事件，再把耗尽状态返回给客户端。
+         */
+        this.db.transaction(() => {
+          this.skipCurrentEvent(userId, input.sessionId!, input.currentEventId!);
+          this.db.prepare(`UPDATE pick_sessions SET last_activity_at = datetime('now') WHERE id = ? AND user_id = ?`)
+            .run(input.sessionId, userId);
+        })();
+      }
+      throw reason;
+    }
   }
 
   private pickInTransaction(userId: number, input: PickRequest): PickResponse {
