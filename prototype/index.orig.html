@@ -1,0 +1,2992 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>话筒递给我 · PickNext 手机端 PWA 原型</title>
+<style>
+  :root {
+    --bg: #0d0e15;
+    --bg-2: #14161f;
+    --card: #1c1f2c;
+    --card-2: #242836;
+    --border: #2b3040;
+    --text: #eceef5;
+    --text-dim: #878da1;
+    --accent: #7c5cff;
+    --pink: #ff4fd8;
+    --cyan: #22d3ee;
+    --green: #34d399;
+    --warn: #fbbf24;
+    --radius: 16px;
+    --safe-b: env(safe-area-inset-bottom, 0px);
+  }
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; padding: 20px;
+  }
+
+  /* ====== 手机外框 ====== */
+  .phone {
+    width: 390px; height: 830px; max-height: 94vh; position: relative;
+    border-radius: 42px; overflow: hidden; background: var(--bg);
+    border: 8px solid #1a1d28; box-shadow: 0 30px 80px rgba(0,0,0,.6);
+    display: flex; flex-direction: column;
+  }
+  .screen { flex: 1; position: relative; overflow: hidden; display: flex; flex-direction: column; }
+  .content { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-behavior: smooth; }
+  .content::-webkit-scrollbar { display: none; }
+
+  /* ====== 状态栏（模拟系统） ====== */
+  .statusbar {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 22px 6px; font-size: 13px; font-weight: 600; color: var(--text);
+    background: var(--bg);
+  }
+  .notch {
+    position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+    width: 120px; height: 26px; background: #000; border-radius: 16px; z-index: 5;
+  }
+
+  /* ====== 顶栏（应用） ====== */
+  .appbar {
+    display: flex; align-items: center; gap: 12px; padding: 8px 16px 10px;
+    background: var(--bg); position: sticky; top: 0; z-index: 20;
+  }
+  .appbar .title { font-size: 18px; font-weight: 800; flex: 1; }
+  .appbar .sub { font-size: 12px; color: var(--text-dim); }
+  .avatar {
+    width: 34px; height: 34px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--cyan), var(--accent));
+    display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700;
+  }
+
+  /* ====== 上次使用轻提醒 ====== */
+  .welcome-banner {
+    display: flex; align-items: center; gap: 10px; margin: 8px 14px 0; padding: 12px 14px;
+    background: linear-gradient(135deg, rgba(124,92,255,.15), rgba(255,79,216,.08));
+    border: 1px solid rgba(124,92,255,.4); border-radius: 14px;
+  }
+  .wb-txt { flex: 1; font-size: 12px; line-height: 1.6; }
+  .wb-txt b { font-size: 13px; }
+  .wb-close { border: none; background: none; color: var(--text-dim); font-size: 18px; cursor: pointer; padding: 0 2px; }
+
+  /* ====== 底部 Tab ====== */
+  .tabbar {
+    display: flex; align-items: flex-end; background: rgba(20,22,31,.96);
+    border-top: 1px solid var(--border);
+    padding: 4px 8px calc(6px + var(--safe-b)); z-index: 40;
+    backdrop-filter: blur(16px); position: relative;
+  }
+  .tab {
+    flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px;
+    padding: 6px 0; border: none; background: none; color: var(--text-dim);
+    font-size: 11px; cursor: pointer; border-radius: 10px;
+  }
+  .tab .ic { font-size: 20px; line-height: 1; }
+  .tab.active { color: var(--accent); }
+  .tab.active .ic { transform: translateY(-2px); }
+  .tab.active::after { content:''; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); }
+
+  /* ====== 中间凸起 Pick 主按钮 ====== */
+  .tab.tab-pick { position: relative; }
+  .tab-pick .pick-btn {
+    width: 76px; height: 76px; border-radius: 50%; margin-top: -40px;
+    background: linear-gradient(135deg, var(--accent), var(--pink));
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 800; letter-spacing: 1.5px; color: #fff; line-height: 1.2;
+    border: 3px solid rgba(255,255,255,.25);
+    box-shadow: 0 10px 30px rgba(255,79,216,.65), 0 0 0 5px var(--bg), 0 0 0 6px rgba(255,79,216,.35);
+    transition: transform .2s;
+  }
+  .tab-pick .pick-btn .pick-dice { font-size: 26px; margin-bottom: 1px; filter: drop-shadow(0 3px 6px rgba(0,0,0,.3)); transition: transform .18s; }
+  .tab-pick .pick-btn .pick-dice.rolling { animation: diceRoll .5s cubic-bezier(.2,.7,.3,1.1); }
+  @keyframes diceRoll {
+    0% { transform: rotate(0deg) scale(1); }
+    30% { transform: rotate(140deg) scale(1.25); }
+    55% { transform: rotate(220deg) scale(.95); }
+    80% { transform: rotate(330deg) scale(1.1); }
+    100% { transform: rotate(360deg) scale(1); }
+  }
+  .tab-pick .pick-btn.bump { animation: pickBump .4s ease; }
+  @keyframes pickBump {
+    0% { transform: scale(1); }
+    40% { transform: scale(1.12); }
+    100% { transform: scale(1); }
+  }
+  .tab-pick:active .pick-btn { transform: scale(.92); }
+  .tab-pick.active .pick-btn {
+    box-shadow: 0 10px 36px rgba(255,79,216,.8), 0 0 0 5px var(--bg), 0 0 24px rgba(124,92,255,.7);
+    border-color: rgba(255,255,255,.45);
+  }
+  .tab-pick.active::after { display: none; }
+  .tab-pick .pick-btn::before {
+    content:''; position: absolute; inset: -4px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent), var(--pink));
+    filter: blur(14px); opacity: .5; z-index: -1; animation: pickPulse 2.2s ease-in-out infinite;
+  }
+  @keyframes pickPulse {
+    0%,100% { transform: scale(1); opacity: .45; }
+    50% { transform: scale(1.14); opacity: .7; }
+  }
+
+  /* ====== 页面 ====== */
+  .page { display: none; padding: 12px 14px 26px; }
+  .page.active { display: block; animation: fadeUp .28s ease; }
+  .page.active.pick-page {
+    position: absolute; top: 58px; left: 0; right: 0; bottom: 62px; z-index: 15;
+    display: flex; flex-direction: column;
+    background: var(--bg);
+    background-image:
+      radial-gradient(600px 300px at 80% -10%, rgba(124,92,255,.15), transparent 60%),
+      radial-gradient(500px 300px at -10% 40%, rgba(255,79,216,.08), transparent 60%);
+  }
+  .pick-page .pick-wrap { flex: 1; display: flex; flex-direction: column; padding: 8px 14px 0; }
+  .pick-page .pick-arena { flex: 1; display: flex; align-items: stretch; justify-content: stretch; min-height: 0; }
+  .pick-page .pick-card { width: 100%; height: 100%; min-height: 0; }
+  .pick-page .pick-actions { margin-top: 12px; }
+  .pick-page .pick-tip { margin-top: 10px; padding-bottom: 12px; }
+  @keyframes fadeUp { from { opacity:0; transform: translateY(10px);} to { opacity:1; transform:none;} }
+
+  /* ====== 按钮 ====== */
+  .btn {
+    border: none; cursor: pointer; font-weight: 700; border-radius: 14px;
+    padding: 14px 20px; font-size: 15px; display: inline-flex; align-items: center; justify-content: center;
+    gap: 8px; transition: transform .15s; touch-action: manipulation;
+  }
+  .btn:active { transform: scale(.97); }
+  .btn-primary { background: linear-gradient(135deg, var(--accent), var(--pink)); color: #fff; width: 100%; box-shadow: 0 8px 24px rgba(124,92,255,.4); }
+  .btn-ghost { background: var(--card); color: var(--text); border: 1px solid var(--border); }
+  .btn-sm { padding: 10px 14px; font-size: 13px; border-radius: 11px; }
+  .btn-round {
+    width: 58px; height: 58px; border-radius: 50%; font-size: 24px; border: none; cursor: pointer;
+    background: linear-gradient(135deg, var(--accent), var(--pink)); color:#fff;
+    box-shadow: 0 8px 24px rgba(255,79,216,.45); position: absolute; right: 18px; bottom: calc(84px + var(--safe-b));
+    z-index: 30; display: flex; align-items: center; justify-content: center;
+  }
+  .btn-round:active { transform: scale(.92); }
+
+  /* ====== 搜索 ====== */
+  .search {
+    display: flex; align-items: center; gap: 8px; background: var(--card);
+    border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; margin-bottom: 12px;
+  }
+  .search input { flex: 1; background: none; border: none; color: var(--text); outline: none; font-size: 14px; }
+  .search:focus-within { border-color: var(--accent); }
+
+  /* ====== 筛选 chips 横滑 ====== */
+  .chips { display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 10px; scrollbar-width: none; }
+  .chips::-webkit-scrollbar { display: none; }
+  .chip {
+    flex-shrink: 0; padding: 8px 16px; border-radius: 999px; font-size: 13px; cursor: pointer;
+    background: var(--card); border: 1px solid var(--border); color: var(--text-dim); white-space: nowrap;
+  }
+  .chip.on { background: linear-gradient(135deg, rgba(124,92,255,.4), rgba(255,79,216,.3)); border-color: var(--accent); color: #fff; }
+
+  /* ====== 歌曲卡片（列表式） ====== */
+  .song-item {
+    display: flex; align-items: center; gap: 12px; padding: 13px 4px;
+    border-bottom: 1px solid rgba(43,48,64,.5); position: relative;
+  }
+  .song-item .cover {
+    width: 46px; height: 46px; border-radius: 12px; flex-shrink: 0;
+    background: linear-gradient(135deg, rgba(124,92,255,.35), rgba(255,79,216,.25));
+    display: flex; align-items: center; justify-content: center; font-size: 20px;
+  }
+  .song-item .info { flex: 1; min-width: 0; }
+  .song-item .name { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .song-item .artist { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+  .stars { color: var(--warn); font-size: 11px; }
+  .tag { font-size: 10px; padding: 2px 7px; border-radius: 5px; background: var(--card-2); color: var(--text-dim); }
+  .tag.lang { color: var(--cyan); border: 1px solid rgba(34,211,238,.3); background: rgba(34,211,238,.08); }
+
+  /* 难度三色标签 */
+  .diff { font-size: 10px; padding: 2px 7px; border-radius: 5px; font-weight: 600; }
+  .diff-easy { color: var(--green); border: 1px solid rgba(52,211,153,.4); background: rgba(52,211,153,.1); }
+  .diff-medium { color: var(--warn); border: 1px solid rgba(251,191,36,.4); background: rgba(251,191,36,.1); }
+  .diff-hard { color: #ff6b81; border: 1px solid rgba(255,107,129,.4); background: rgba(255,107,129,.1); }
+
+  /* 选中序号徽标 */
+  .sel-mark {
+    width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
+    border: 2px solid var(--border); background: var(--card);
+    color: #fff; font-size: 11px; font-weight: 800;
+    display: none; align-items: center; justify-content: center;
+  }
+  .song-item.selected {
+    background: rgba(124,92,255,.1); border-radius: 12px;
+    border-bottom-color: transparent;
+  }
+  .song-item.selected .sel-mark {
+    display: flex; background: linear-gradient(135deg, var(--accent), var(--pink));
+    border-color: transparent; box-shadow: 0 2px 8px rgba(255,79,216,.5);
+  }
+  .song-item.batch-mode .sel-mark { display: flex; }
+  .btn-quick-add {
+    width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
+    border: 1.5px solid var(--accent); background: rgba(124,92,255,.12);
+    color: var(--accent); font-size: 17px; font-weight: 700; cursor: pointer;
+    transition: all .15s;
+  }
+  .btn-quick-add:active { background: rgba(124,92,255,.3); transform: scale(.92); }
+  .song-item.batch-mode .btn-quick-add { display: none; }
+  .btn-maintain {
+    width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--card-2); color: var(--cyan); font-size: 16px; cursor: pointer; flex-shrink: 0;
+  }
+
+  /* ====== 库视图子 Tab ====== */
+  .subtab {
+    display: flex; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 4px; margin-bottom: 12px; gap: 4px;
+  }
+  .subtab button {
+    flex: 1; padding: 9px 0; border: none; background: none; color: var(--text-dim);
+    font-size: 13px; font-weight: 600; border-radius: 9px; cursor: pointer; transition: all .2s;
+  }
+  .subtab button.on { background: linear-gradient(135deg, rgba(124,92,255,.4), rgba(255,79,216,.25)); color: #fff; }
+  .subtab .cnt { font-size: 10px; color: var(--text-dim); margin-left: 4px; }
+
+  /* ====== 我的曲库次级切换（歌曲/歌单） ====== */
+  .subnav { display: flex; gap: 8px; margin-bottom: 10px; }
+  .subnav button {
+    flex: 1; padding: 8px 0; border: 1px solid var(--border); background: var(--card);
+    color: var(--text-dim); font-size: 13px; font-weight: 600; border-radius: 10px; cursor: pointer;
+  }
+  .subnav button.on { color: #fff; border-color: var(--accent); background: linear-gradient(135deg, rgba(124,92,255,.35), rgba(255,79,216,.2)); }
+
+  /* ====== 曲库顶栏：下拉 + 搜索 + 筛选 ====== */
+  .lib-top { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .lib-select {
+    display: flex; align-items: center; gap: 4px; padding: 10px 12px;
+    border: 1px solid var(--border); background: var(--card); border-radius: 12px;
+    font-size: 13px; font-weight: 600; cursor: pointer; flex-shrink: 0;
+  }
+  .lib-select-arrow { color: var(--text-dim); font-size: 11px; }
+  .lib-select-menu { position: absolute; left: 14px; right: 14px; z-index: 30; background: var(--card-2); border: 1px solid var(--accent); border-radius: 12px; padding: 6px; margin-bottom: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+  .lsm-item { padding: 11px 14px; border-radius: 8px; font-size: 14px; cursor: pointer; }
+  .lsm-item.on { background: linear-gradient(135deg, rgba(124,92,255,.35), rgba(255,79,216,.2)); color: #fff; font-weight: 600; }
+
+  /* 筛选图标按钮 */
+  .lib-filter-btn {
+    width: 40px; height: 40px; border-radius: 12px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text-dim); font-size: 18px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .lib-filter-btn:active { background: var(--card-2); }
+
+  /* ====== 复用按钮 ====== */
+  .btn-reuse {
+    border: 1px solid var(--accent); background: rgba(124,92,255,.15); color: var(--accent);
+    padding: 6px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; cursor: pointer;
+    flex-shrink: 0; transition: all .15s;
+  }
+  .btn-reuse:active { background: rgba(124,92,255,.3); }
+  .in-my { font-size: 10px; color: var(--green); font-weight: 600; }
+
+  /* ====== 列表状态徽标（方案B） ====== */
+  .song-item .status-badges { display: flex; gap: 4px; flex-shrink: 0; flex-direction: column; align-items: flex-end; }
+  .s-badge { font-size: 9px; padding: 2px 6px; border-radius: 5px; white-space: nowrap; }
+  .s-badge.ly { color: var(--cyan); border: 1px solid rgba(34,211,238,.35); background: rgba(34,211,238,.08); }
+  .s-badge.noly { color: var(--text-dim); border: 1px solid var(--border); }
+  .s-badge.recent { color: var(--warn); border: 1px solid rgba(251,191,36,.4); background: rgba(251,191,36,.1); }
+  .s-badge.note { color: var(--accent-2); border: 1px solid rgba(255,79,216,.35); background: rgba(255,79,216,.08); }
+
+  /* ====== 点歌历史按日分组 ====== */
+  .hist-day { margin-bottom: 10px; }
+  .hist-day-head { display: flex; align-items: center; gap: 10px; padding: 8px 4px; cursor: pointer; }
+  .hist-day-head:active { opacity: .7; }
+  .hist-arrow { color: var(--accent-2); font-size: 11px; width: 16px; }
+  .hist-day-label { font-size: 14px; font-weight: 700; }
+  .hist-day-count { font-size: 11px; color: var(--text-dim); background: var(--card); border: 1px solid var(--border); padding: 2px 8px; border-radius: 999px; }
+
+  /* ====== 历史统计 ====== */
+  .hist-stats { display: flex; gap: 8px; margin-bottom: 10px; }
+  .hs-item { flex: 1; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 10px; text-align: center; }
+  .hs-item .v { font-size: 18px; font-weight: 800; color: var(--accent); }
+  .hs-item .l { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+
+  /* ====== 筛选 Sheet ====== */
+  .fl-group { margin-bottom: 14px; }
+  .fl-label { font-size: 13px; font-weight: 700; color: var(--text-dim); margin-bottom: 8px; }
+  .fl-options { display: flex; gap: 8px; flex-wrap: wrap; }
+  .fl-opt {
+    padding: 8px 14px; border-radius: 999px; font-size: 12px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--card); color: var(--text-dim);
+  }
+  .fl-opt.on { color: #fff; background: linear-gradient(135deg, rgba(124,92,255,.45), rgba(255,79,216,.3)); border-color: var(--accent); }
+  .play-count { font-size: 10px; color: var(--accent-2); margin-left: 6px; }
+
+  /* ====== 歌曲详情 ====== */
+  .sd-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 2px; }
+  .sd-title { font-size: 22px; font-weight: 800; }
+  .sd-artist { font-size: 15px; color: var(--cyan); }
+  .sd-owner {
+    font-size: 12px; color: var(--text-dim); margin: 6px 0 14px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .sd-owner .mine-badge { color: var(--green); }
+  .sd-meta { display: flex; gap: 6px; margin-bottom: 16px; }
+  .sd-section { font-size: 13px; color: var(--text-dim); font-weight: 700; margin: 4px 0 10px; }
+  .sd-stars { font-size: 26px; letter-spacing: 3px; color: var(--warn); margin-bottom: 16px; }
+  .sd-badges { display: flex; gap: 6px; margin-bottom: 8px; }
+  .sd-note { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 13px; color: var(--text); margin-bottom: 16px; line-height: 1.6; }
+  .sd-note.empty { color: var(--text-dim); font-style: italic; }
+  .sd-plays { font-size: 12px; color: var(--text-dim); margin-bottom: 16px; }
+  .sd-plays b { color: var(--accent-2); }
+  .sd-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+  .sd-actions .btn { padding: 12px 8px; font-size: 13px; }
+  .hist { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 6px 12px; }
+  .hist-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid rgba(43,48,64,.4); font-size: 12px; }
+  .hist-row:last-child { border-bottom: none; }
+  .hist-row .time { color: var(--text-dim); flex-shrink: 0; }
+  .hist-row .who { color: var(--cyan); flex-shrink: 0; }
+  .hist-row .what { color: var(--text); flex: 1; min-width: 0; }
+  .hist-row .rollback {
+    border: 1px solid var(--border); background: var(--card-2); color: var(--text-dim);
+    padding: 4px 10px; border-radius: 7px; font-size: 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .hist-row .rollback:hover { color: var(--accent); border-color: var(--accent); }
+
+  /* ====== 重复检测面板 ====== */
+  .dup-panel {
+    background: rgba(251,191,36,.07); border: 1px solid rgba(251,191,36,.35);
+    border-radius: 14px; padding: 12px; margin-bottom: 12px;
+  }
+  .dup-head { font-size: 13px; font-weight: 700; color: var(--warn); margin-bottom: 10px; }
+  .dup-row { display: flex; align-items: center; gap: 10px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+  .dup-info { flex: 1; min-width: 0; }
+  .dup-name { font-size: 14px; font-weight: 600; }
+  .dup-sub { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+  .dup-note { font-size: 11px; color: var(--warn); margin-bottom: 8px; line-height: 1.6; }
+
+  /* ====== 审核（对比卡片） ====== */
+  .import-result { background: var(--card); border: 1px solid var(--accent); border-radius: 12px; padding: 12px 14px; margin-top: 12px; }
+  .ir-title { font-size: 13px; font-weight: 700; color: var(--accent); margin-bottom: 8px; }
+  .ir-row { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; color: var(--text-dim); }
+  .ir-row b { color: var(--text); }
+  .pending-card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; margin-bottom: 12px; padding: 14px; }
+  .pc-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .pc-head .pc-title { font-size: 14px; font-weight: 700; flex: 1; }
+  .pc-head .dup-tag { font-size: 10px; color: var(--warn); border: 1px solid rgba(251,191,36,.4); background: rgba(251,191,36,.1); padding: 2px 7px; border-radius: 5px; }
+  .pc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+  .pc-col { border-radius: 10px; padding: 10px 12px; }
+  .pc-col.submit { background: rgba(251,191,36,.06); border: 1px solid rgba(251,191,36,.25); }
+  .pc-col.exist { background: rgba(52,211,153,.06); border: 1px solid rgba(52,211,153,.25); }
+  .pc-col-label { font-size: 10px; color: var(--text-dim); margin-bottom: 8px; font-weight: 700; }
+  .pc-col.submit .pc-col-label { color: var(--warn); }
+  .pc-col.exist .pc-col-label { color: var(--green); }
+  .pc-field { font-size: 12px; padding: 3px 0; display: flex; justify-content: space-between; gap: 6px; }
+  .pc-field .k { color: var(--text-dim); flex-shrink: 0; }
+  .pc-field .v { text-align: right; }
+  .pc-field .v.diff { color: var(--warn); font-weight: 700; }
+  .pc-field .v.same { color: var(--green); }
+  .pc-who { font-size: 11px; color: var(--text-dim); margin-bottom: 10px; }
+  .pending-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .pending-actions .btn-x, .pending-actions .btn-check { flex: 1; }
+  .btn-check { border: none; background: var(--green); color: #04120c; padding: 10px 0; border-radius: 10px; font-size: 13px; font-weight: 700; cursor: pointer; }
+  .btn-x { border: 1px solid var(--border); background: var(--card-2); color: var(--text-dim); padding: 10px 0; border-radius: 10px; font-size: 13px; cursor: pointer; }
+
+  /* ====== 用户管理 ====== */
+  .user-row { display: flex; align-items: center; gap: 10px; padding: 12px 0; border-bottom: 1px solid rgba(43,48,64,.5); }
+  .user-row:last-child { border-bottom: none; }
+  .user-row .u-info { flex: 1; min-width: 0; }
+  .user-row .u-name { font-size: 14px; font-weight: 600; }
+  .user-row .u-sub { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+  .role-badge { font-size: 10px; padding: 2px 8px; border-radius: 6px; font-weight: 600; }
+  .role-admin { color: var(--pink); border: 1px solid rgba(255,79,216,.4); background: rgba(255,79,216,.1); }
+  .role-maint { color: var(--cyan); border: 1px solid rgba(34,211,238,.4); background: rgba(34,211,238,.1); }
+  .role-user { color: var(--text-dim); border: 1px solid var(--border); }
+
+  /* ====== 我的页账号卡片 ====== */
+  .me-account { display: flex; align-items: center; gap: 12px; padding: 16px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 10px; }
+  .me-avatar { width: 52px; height: 52px; border-radius: 50%; background: linear-gradient(135deg, var(--cyan), var(--accent)); display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 700; flex-shrink: 0; }
+  .me-info { flex: 1; min-width: 0; }
+  .me-name { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .me-name .role-badge { cursor: pointer; }
+  .me-sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+  .me-stats { display: flex; gap: 14px; flex-shrink: 0; }
+  .me-stat { text-align: center; }
+  .me-stat b { display: block; font-size: 18px; font-weight: 800; color: var(--accent); }
+  .me-stat span { font-size: 10px; color: var(--text-dim); }
+  .me-role-switch { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 10px; }
+
+  /* ====== 个人数据快捷卡 ====== */
+  .me-quick { display: flex; gap: 8px; margin-bottom: 10px; }
+  .mq-item {
+    flex: 1; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 8px; text-align: center; cursor: pointer;
+  }
+  .mq-item:active { background: var(--card-2); }
+  .mq-icon { font-size: 20px; margin-bottom: 6px; }
+  .mq-v { font-size: 18px; font-weight: 800; }
+  .mq-l { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+
+  /* ====== 批量操作条（底部弹出） ====== */
+  .batch {
+    display: none; position: absolute; left: 12px; right: 12px; bottom: calc(74px + var(--safe-b));
+    z-index: 45; background: var(--card-2); border: 1px solid var(--accent); border-radius: 16px;
+    padding: 10px 12px; gap: 6px; align-items: center; flex-wrap: wrap;
+    box-shadow: 0 -4px 24px rgba(0,0,0,.5), 0 0 0 1px rgba(124,92,255,.2);
+    animation: sheetUp .25s ease;
+  }
+  .batch.show { display: flex; flex-direction: column; gap: 6px; }
+  .batch .count { width: 100%; font-weight: 700; color: var(--accent-2); font-size: 14px; }
+  .batch-row { display: flex; gap: 6px; width: 100%; }
+  .batch-row .btn-sm { flex: 1; }
+
+  /* ====== 随机 Pick ====== */
+  .pick-wrap { padding: 8px 4px; display: flex; flex-direction: column; }
+  .pick-filter-bar {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+  }
+  .pick-filter-toggle {
+    border: 1px solid var(--border); background: var(--card); color: var(--text);
+    padding: 8px 16px; border-radius: 999px; font-size: 13px; font-weight: 600; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .pick-filter-toggle .pf-arrow { color: var(--text-dim); font-size: 11px; }
+  .pf-status { flex: 1; font-size: 12px; color: var(--text-dim); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pf-avoid {
+    padding: 8px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; cursor: pointer;
+    border: 1px solid var(--border); background: var(--card); color: var(--text-dim);
+  }
+  .pf-avoid.on { color: var(--warn); border-color: rgba(251,191,36,.5); background: rgba(251,191,36,.1); }
+  .pf-history {
+    width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border);
+    background: var(--card); font-size: 16px; cursor: pointer; display: flex;
+    align-items: center; justify-content: center; color: var(--text-dim);
+  }
+  .pf-history:active { background: var(--card-2); }
+  .pick-filters .chip { flex: 1; text-align: center; padding: 11px 0; font-size: 12px; }
+  .pick-arena { position: relative; perspective: 1200px; flex: 1; min-height: 360px; display: flex; align-items: center; justify-content: center; }
+  .pick-glow {
+    position: absolute; inset: -10px; border-radius: 30px; opacity: 0; z-index: 0;
+    background: radial-gradient(300px 220px at 50% 40%, rgba(124,92,255,.35), transparent 70%);
+    transition: opacity .6s ease; pointer-events: none;
+  }
+  .pick-glow.hit { opacity: 1; animation: glowPulse 1.4s ease; }
+  @keyframes glowPulse {
+    0% { opacity: 0; transform: scale(.92); }
+    25% { opacity: 1; }
+    100% { opacity: 0; transform: scale(1.06); }
+  }
+  .pick-card {
+    width: 100%; height: 100%; min-height: 460px; border-radius: 24px; text-align: center; cursor: default;
+    position: relative; z-index: 1; transform-style: preserve-3d;
+    transition: transform .55s cubic-bezier(.2,.7,.3,1.1);
+    user-select: none; touch-action: manipulation;
+  }
+  .pick-card.flip { transform: rotateY(180deg); }
+  .pick-card .pick-card-inner { position: absolute; inset: 0; transform-style: preserve-3d; }
+  .face {
+    position: absolute; inset: 0; backface-visibility: hidden; -webkit-backface-visibility: hidden;
+    border-radius: 24px; display: flex; flex-direction: column;
+    align-items: center; padding: 24px 20px;
+  }
+  .face.back {
+    background:
+      radial-gradient(340px 200px at 50% 0%, rgba(124,92,255,.45), transparent 70%),
+      radial-gradient(200px 120px at 20% 80%, rgba(255,79,216,.25), transparent 60%),
+      radial-gradient(180px 120px at 80% 70%, rgba(34,211,238,.2), transparent 60%),
+      linear-gradient(165deg, var(--card-2), var(--card));
+    border: 1px solid rgba(124,92,255,.45); box-shadow: 0 14px 40px rgba(0,0,0,.4), 0 0 40px rgba(124,92,255,.18);
+  }
+  .face.back::after {
+    content:''; position: absolute; inset: 14px; border-radius: 18px;
+    border: 1px dashed rgba(124,92,255,.4); pointer-events: none;
+    animation: dashSpin 12s linear infinite;
+  }
+  @keyframes dashSpin { to { transform: rotate(360deg); } }
+  .face.back::before {
+    content:'✨'; position: absolute; top: 12%; left: 14%; font-size: 18px; opacity:.5;
+    animation: twinkle 2.4s ease-in-out infinite;
+  }
+  .face.back .back-ic { font-size: 60px; margin-bottom: 18px; filter: drop-shadow(0 8px 28px rgba(124,92,255,.8)); animation: floatIc 2.6s ease-in-out infinite; }
+  @keyframes floatIc { 0%,100%{ transform: translateY(0);} 50%{ transform: translateY(-8px);} }
+  @keyframes twinkle { 0%,100%{ opacity:.3; transform: scale(.9);} 50%{ opacity:.8; transform: scale(1.15);} }
+  .face.back .back-txt { font-size: 20px; font-weight: 800; margin-bottom: 8px; text-shadow: 0 0 20px rgba(124,92,255,.6); }
+  .face.back .back-sub { font-size: 13px; color: var(--text-dim); }
+  .face.front {
+    background:
+      radial-gradient(340px 200px at 50% 0%, rgba(124,92,255,.38), transparent 70%),
+      radial-gradient(200px 120px at 80% 90%, rgba(255,79,216,.2), transparent 60%),
+      linear-gradient(165deg, var(--card-2), var(--card));
+    border: 1px solid var(--accent); box-shadow: 0 14px 44px rgba(124,92,255,.28), 0 0 50px rgba(124,92,255,.15);
+    transform: rotateY(180deg);
+  }
+  .front-badge {
+    font-size: 11px; font-weight: 700; letter-spacing: 2px; color: var(--pink);
+    border: 1px solid rgba(255,79,216,.4); background: rgba(255,79,216,.1);
+    padding: 5px 14px; border-radius: 999px; margin-bottom: 14px;
+  }
+  .front-head { flex-shrink: 0; }
+  .pick-card .big {
+    font-size: 38px; font-weight: 900; margin-bottom: 6px;
+    background: linear-gradient(135deg, #fff 20%, var(--accent) 70%, var(--pink));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 2px 16px rgba(124,92,255,.5));
+    letter-spacing: 2px;
+  }
+  .pick-card .who { font-size: 17px; color: var(--cyan); text-shadow: 0 0 12px rgba(34,211,238,.5); cursor: pointer; }
+  .pick-card .who:active { opacity: .7; }
+  .pick-card .ly {
+    flex: 1; min-height: 0; width: 100%; margin-top: 20px;
+    display: flex; flex-direction: column; position: relative;
+    border-radius: 16px; overflow: hidden; cursor: pointer;
+  }
+  .ly-hint {
+    font-size: 11px; color: var(--text-dim); padding: 8px 0 6px;
+    border-bottom: 1px dashed rgba(124,92,255,.25);
+  }
+  .ly-scroll {
+    flex: 1; overflow-y: auto; padding: 10px 8px; scroll-behavior: smooth;
+    font-size: 17px; line-height: 2.1; color: var(--text-dim); text-align: center;
+  }
+  .ly-scroll::-webkit-scrollbar { width: 4px; }
+  .ly-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .ly-scroll .cur { color: #fff; font-weight: 800; font-size: 19px; }
+  .ly-scroll div { padding: 6px 0; transition: all .25s; }
+
+  /* ====== 全屏跟唱 ====== */
+  .karaoke {
+    display: none; position: absolute; inset: 0; z-index: 80; flex-direction: column;
+    background:
+      radial-gradient(500px 300px at 50% 15%, rgba(124,92,255,.25), transparent 70%),
+      linear-gradient(180deg, #0b0c12, var(--bg));
+  }
+  .karaoke.show { display: flex; animation: fadeUp .3s ease; }
+  .karaoke-head {
+    display: flex; align-items: center; gap: 10px; padding: 14px 16px 8px;
+  }
+  .karaoke-head .t { flex: 1; text-align: center; font-size: 18px; font-weight: 800; }
+  .karaoke-head .s { font-size: 13px; color: var(--cyan); }
+  .karaoke-lyrics {
+    flex: 1; overflow-y: auto; padding: 40px 26px; scroll-behavior: smooth;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  .karaoke-lyrics::-webkit-scrollbar { display: none; }
+  .karaoke-lyrics .k-line {
+    padding: 14px 8px; font-size: 22px; color: var(--text-dim); text-align: center;
+    line-height: 1.6; transition: all .35s; width: 100%; cursor: pointer;
+    border-radius: 12px;
+  }
+  .karaoke-lyrics .k-line:hover { background: rgba(124,92,255,.12); }
+  .karaoke-lyrics .k-line.cur {
+    color: #fff; font-weight: 800; font-size: 27px;
+    text-shadow: 0 0 30px rgba(124,92,255,.8);
+  }
+  .karaoke-foot { padding: 10px 16px 22px; display: flex; gap: 10px; }
+  .karaoke-foot .btn { flex: 1; }
+
+  .pick-actions { margin-top: 16px; }
+  .btn-done {
+    width: 100%; padding: 17px 0; font-size: 17px; font-weight: 800; border-radius: 18px;
+    background: linear-gradient(135deg, var(--accent), var(--pink));
+    box-shadow: 0 8px 28px rgba(255,79,216,.45), 0 0 0 1px rgba(255,255,255,.12) inset;
+    letter-spacing: 1px;
+  }
+  .btn-done:active { transform: scale(.97); }
+  .pick-tip { font-size: 12px; color: var(--text-dim); text-align: center; margin-top: 12px; line-height: 1.7; }
+
+  /* ====== 歌单卡片 ====== */
+  .pl-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 16px; margin-bottom: 12px; display: flex; align-items: center; gap: 12px;
+  }
+  .pl-cover {
+    width: 52px; height: 52px; border-radius: 14px; flex-shrink: 0;
+    background: linear-gradient(135deg, rgba(255,79,216,.4), rgba(124,92,255,.35));
+    display: flex; align-items: center; justify-content: center; font-size: 24px;
+  }
+  .pl-info { flex: 1; min-width: 0; }
+  .pl-name { font-size: 15px; font-weight: 700; margin-bottom: 3px; }
+  .pl-sub { font-size: 12px; color: var(--text-dim); }
+  .pl-badges { margin-top: 5px; display: flex; gap: 6px; }
+  .b-collab { font-size: 10px; color: var(--green); border: 1px solid rgba(52,211,153,.3); background: rgba(52,211,153,.08); padding: 2px 7px; border-radius: 5px; }
+
+  /* ====== 下次KTV 固定歌单 ====== */
+  .ktv-card {
+    background: linear-gradient(135deg, rgba(124,92,255,.15), rgba(255,79,216,.1));
+    border: 1px solid rgba(124,92,255,.5);
+    box-shadow: 0 0 20px rgba(124,92,255,.15);
+  }
+  .ktv-cover { background: linear-gradient(135deg, var(--accent), var(--pink)); box-shadow: 0 4px 12px rgba(255,79,216,.4); }
+  .b-ktv { font-size: 10px; color: var(--accent); border: 1px solid rgba(124,92,255,.5); background: rgba(124,92,255,.15); padding: 2px 7px; border-radius: 5px; font-weight: 600; }
+
+  /* ====== 设置 ====== */
+  .set-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-bottom: 12px; }
+  .set-row { display: flex; align-items: center; justify-content: space-between; padding: 15px 16px; border-bottom: 1px solid rgba(43,48,64,.5); }
+  .set-row:last-child { border-bottom: none; }
+  .set-row .label { font-size: 14px; }
+  .set-row .hint { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+  .switch { width: 46px; height: 26px; border-radius: 13px; background: var(--border); position: relative; cursor: pointer; flex-shrink: 0; }
+  .switch::after { content:''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: all .2s; }
+  .switch.on { background: linear-gradient(135deg, var(--accent), var(--pink)); }
+  .switch.on::after { left: 23px; }
+
+  /* ====== Bottom Sheet ====== */
+  .sheet-mask {
+    display: none; position: absolute; inset: 0; background: rgba(0,0,0,.65); z-index: 60;
+    align-items: flex-end; backdrop-filter: blur(3px);
+  }
+  .sheet-mask.show { display: flex; }
+  .sheet {
+    width: 100%; background: var(--bg-2); border-radius: 22px 22px 0 0;
+    padding: 14px 18px calc(22px + var(--safe-b)); max-height: 86%; overflow-y: auto;
+    animation: sheetUp .25s ease;
+  }
+  @keyframes sheetUp { from { transform: translateY(40px); opacity: .5; } to { transform:none; opacity:1; } }
+  .sheet-grab { width: 40px; height: 4px; border-radius: 2px; background: var(--border); margin: 2px auto 14px; }
+  .sheet h3 { font-size: 17px; margin-bottom: 16px; }
+
+  /* ====== 表单 ====== */
+  .field { margin-bottom: 12px; }
+  .field label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
+  .field input, .field select, .field textarea {
+    width: 100%; background: var(--card); border: 1px solid var(--border); color: var(--text);
+    border-radius: 12px; padding: 13px 14px; font-size: 15px; outline: none; font-family: inherit;
+  }
+  .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .ly-editor { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 10px; }
+  .ly-row { display: grid; grid-template-columns: 52px 1fr 1fr 30px; gap: 6px; margin-bottom: 6px; align-items: center; }
+  .ly-row .time { color: var(--cyan); font-size: 11px; font-family: monospace; }
+  .ly-row input { background: var(--card-2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 8px; font-size: 12px; outline: none; }
+  .ly-row .add { width: 30px; height: 30px; border-radius: 8px; border: 1px dashed var(--accent); background: none; color: var(--accent); font-size: 16px; cursor: pointer; }
+  .stars-pick { font-size: 26px; letter-spacing: 3px; color: var(--warn); cursor: pointer; text-align: center; }
+
+  /* ====== 歌词跟唱 ====== */
+  .lyrics-box { height: 340px; overflow-y: auto; padding: 12px 6px; scroll-behavior: smooth; }
+  .lyrics-box::-webkit-scrollbar { width: 4px; }
+  .lyrics-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .ly-line { padding: 9px 10px; font-size: 15px; color: var(--text-dim); border-radius: 10px; transition: all .25s; }
+  .ly-line.cur { color: #fff; font-weight: 700; font-size: 17px; background: linear-gradient(135deg, rgba(124,92,255,.3), rgba(255,79,216,.12)); }
+
+  /* ====== 初始化/登录 ====== */
+  .auth { display: flex; flex-direction: column; align-items: center; padding: 26px 22px; text-align: center; }
+  .auth .logo {
+    width: 76px; height: 76px; border-radius: 22px; font-size: 38px; margin: 12px 0 18px;
+    background: linear-gradient(135deg, var(--accent), var(--pink));
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 10px 34px rgba(124,92,255,.5);
+  }
+  .auth h1 { font-size: 22px; margin-bottom: 6px; }
+  .auth .desc { font-size: 13px; color: var(--text-dim); line-height: 1.7; margin-bottom: 22px; }
+  .auth-card { width: 100%; background: var(--card); border: 1px solid var(--border); border-radius: 18px; padding: 18px; }
+  .auth .switch-link { font-size: 13px; color: var(--text-dim); margin-top: 16px; }
+  .auth .switch-link a { color: var(--cyan); }
+
+  /* ====== PWA 提示 ====== */
+  .pwa-banner {
+    position: absolute; bottom: 66px; left: 12px; right: 12px; z-index: 45;
+    background: var(--card-2); border: 1px solid var(--accent); border-radius: 14px;
+    padding: 12px 14px; display: flex; align-items: center; gap: 10px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.5); animation: fadeUp .3s ease;
+  }
+  .pwa-banner .txt { flex: 1; font-size: 12px; line-height: 1.5; }
+  .pwa-banner .txt b { font-size: 13px; }
+
+  /* ====== Toast ====== */
+  .toasts { position: absolute; bottom: 120px; left: 50%; transform: translateX(-50%); z-index: 90; display: flex; flex-direction: column; gap: 8px; align-items: center; width: 86%; }
+  .toast { background: var(--card-2); border: 1px solid var(--border); color: var(--text); padding: 12px 18px; border-radius: 12px; font-size: 13px; box-shadow: 0 8px 24px rgba(0,0,0,.5); animation: fadeUp .2s ease; text-align: center; }
+
+  .mock-note { font-size: 11px; color: var(--warn); background: rgba(251,191,36,.1); border: 1px solid rgba(251,191,36,.3); border-radius: 10px; padding: 8px 10px; margin-bottom: 12px; line-height: 1.6; }
+  .dot-row { display: flex; justify-content: center; gap: 6px; margin-top: 20px; }
+  .dot-row .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border); }
+  .dot-row .dot.on { background: var(--accent); }
+</style>
+</head>
+<body>
+
+<div class="phone">
+  <div class="screen">
+    <div class="statusbar">
+      <span>21:37</span>
+      <div class="notch"></div>
+      <span>📶 🔋 87%</span>
+    </div>
+
+    <!-- ===== 初始化 ===== -->
+    <div id="page-setup" class="content" style="display:none; flex-direction:column;">
+      <div class="auth">
+        <div class="logo">🎤</div>
+        <h1>初始化「话筒递给我」</h1>
+        <p class="desc">首次部署需要创建管理员账号<br>后续可在设置中开放普通用户注册</p>
+        <div class="auth-card">
+          <div class="field"><label>管理员用户名</label><input placeholder="如 admin" value="admin"></div>
+          <div class="field"><label>密码</label><input type="password" placeholder="至少 6 位"></div>
+          <div class="field"><label>确认密码</label><input type="password" placeholder="再次输入密码"></div>
+          <button class="btn btn-primary" onclick="goLogin()">创建管理员账号</button>
+        </div>
+        <div class="dot-row"><span class="dot on"></span><span class="dot"></span></div>
+      </div>
+    </div>
+
+    <!-- ===== 登录 ===== -->
+    <div id="page-login" class="content" style="display:flex; flex-direction:column;">
+      <div class="auth">
+        <div class="logo">🎤</div>
+        <h1>话筒递给我</h1>
+        <p class="desc">存下会唱的歌 · 一键 Pick 下一首</p>
+        <div class="auth-card">
+          <div class="field"><label>用户名</label><input placeholder="请输入用户名"></div>
+          <div class="field"><label>密码</label><input type="password" placeholder="请输入密码"></div>
+          <button class="btn btn-primary" onclick="enterApp()">登录</button>
+          <div class="switch-link">还没有账号？<a href="#" onclick="toast('模拟：切换为注册表单（用户名+密码+确认密码）')">去注册</a></div>
+          <div class="switch-link" style="margin-top:8px">忘记密码？<a href="#" onclick="openSheet('sheet-forgot')">点此查看找回方式</a></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 主应用 ===== -->
+    <div id="page-main" class="screen" style="display:none; flex:1;">
+      <div id="main-appbar" class="appbar">
+        <div style="flex:1"><div class="title" id="bar-title">曲库</div><div class="sub" id="bar-sub">48 首会唱的歌</div></div>
+        <div class="avatar">林</div>
+      </div>
+
+      <!-- 上次使用轻提醒 -->
+      <div class="welcome-banner" id="welcome-banner" style="display:none">
+        <div class="wb-txt" id="wb-txt"></div>
+        <button class="btn btn-primary btn-sm" style="width:auto; padding:8px 14px" onclick="goToKtv()">去唱歌 🎤</button>
+        <button class="wb-close" onclick="closeWelcome()">×</button>
+      </div>
+
+      <div class="content" id="content-scroll">
+
+        <!-- 曲库 -->
+        <div id="tab-library" class="page active" style="position:relative">
+          <div class="subtab">
+            <button class="on" id="subtab-mine" onclick="setLibView('mine')">我的曲库<span class="cnt" id="cnt-mine"></span></button>
+            <button id="subtab-all" onclick="setLibView('all')">全部曲库<span class="cnt" id="cnt-all"></span></button>
+          </div>
+
+          <!-- 顶栏：下拉切换 + 搜索 + 筛选（歌曲/歌单共用） -->
+          <div class="lib-top" id="lib-top">
+            <div class="lib-select" id="lib-select" onclick="toggleMineSelect()">
+              <span id="lib-select-label">歌曲</span>
+              <span class="lib-select-arrow">▾</span>
+            </div>
+            <div class="search" style="flex:1; margin-bottom:0"><input id="lib-search" placeholder="搜索歌名、歌手…" oninput="onLibSearch()"></div>
+            <button class="lib-filter-btn" id="btn-lib-filter" onclick="openSheet('sheet-filter')" title="筛选">⚙</button>
+            <button class="btn btn-ghost btn-sm" id="btn-import" style="display:none; flex-shrink:0; padding:8px 12px" onclick="openSheet('sheet-import')">导入</button>
+          </div>
+          <div class="lib-select-menu" id="lib-select-menu" style="display:none">
+            <div class="lsm-item on" data-sub="songs" onclick="setMineSub('songs')">🎵 全部歌曲</div>
+            <div class="lsm-item" data-sub="plists" onclick="setMineSub('plists')">📋 我的歌单</div>
+          </div>
+
+          <!-- 歌单视图 -->
+          <div id="view-playlists" style="display:none">
+            <div class="pl-card ktv-card" onclick="openPlaylistDetail('ktv')">
+              <div class="pl-cover ktv-cover">🎤</div>
+              <div class="pl-info">
+                <div class="pl-name">下一次 KTV</div>
+                <div class="pl-sub">攒好的歌 · <span id="ktv-count">0</span> 首</div>
+                <div class="pl-badges"><span class="b-ktv">⚡ 一键攒歌目标</span></div>
+              </div>
+              <span style="color:var(--text-dim)">›</span>
+            </div>
+            <button class="btn btn-ghost" style="width:100%; margin-bottom:12px" onclick="openSheet('sheet-pl-new')">＋ 新建歌单</button>
+            <div class="pl-card" onclick="openPlaylistDetail('normal')">
+              <div class="pl-cover">🎂</div>
+              <div class="pl-info">
+                <div class="pl-name">生日局</div>
+                <div class="pl-sub">12 首 · 更新于 2 天前</div>
+                <div class="pl-badges"><span class="b-collab">👥 协作中</span></div>
+              </div>
+              <span style="color:var(--text-dim)">›</span>
+            </div>
+            <div class="pl-card" onclick="openPlaylistDetail('normal')">
+              <div class="pl-cover">🎤</div>
+              <div class="pl-info">
+                <div class="pl-name">好友合唱</div>
+                <div class="pl-sub">8 首 · 更新于 昨天</div>
+                <div class="pl-badges"><span class="b-collab">👥 协作中</span></div>
+              </div>
+              <span style="color:var(--text-dim)">›</span>
+            </div>
+            <div class="pl-card" onclick="openPlaylistDetail('normal')">
+              <div class="pl-cover">🎵</div>
+              <div class="pl-info">
+                <div class="pl-name">周杰伦专场</div>
+                <div class="pl-sub">6 首 · 仅自己</div>
+              </div>
+              <span style="color:var(--text-dim)">›</span>
+            </div>
+          </div>
+
+          <!-- 歌曲视图 -->
+          <div id="view-songs" style="position:relative">
+            <div class="chips" id="scene-chips" style="margin-bottom:4px"></div>
+            <div id="song-list"></div>
+            <div id="lib-empty" style="display:none; text-align:center; padding:40px 0; color:var(--text-dim)">
+              <div style="font-size:40px; margin-bottom:12px">🎤</div>
+              <div style="font-size:15px; font-weight:600; color:var(--text); margin-bottom:6px" id="empty-title">我的曲库还是空的</div>
+              <div style="font-size:13px; margin-bottom:18px" id="empty-desc">从「全部曲库」挑选喜欢的歌，或添加一首新歌</div>
+              <button class="btn btn-ghost" onclick="setLibView('all')">去全部曲库看看</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 随机 Pick -->
+        <div id="tab-pick" class="page pick-page">
+          <div class="pick-wrap">
+            <div class="pick-filter-bar" id="pick-filter-bar">
+              <button class="pick-filter-toggle" onclick="openSheet('sheet-filter')">
+                <span>🎲 筛选</span>
+                <span class="pf-arrow">▾</span>
+              </button>
+              <span class="pf-status" id="pf-status">全部</span>
+              <button class="pf-avoid chip" id="pf-avoid" onclick="toggleAvoid()">避近期</button>
+              <button class="pf-history" onclick="openSheet('sheet-history')">🕐</button>
+            </div>
+
+            <div class="pick-arena">
+              <div class="pick-card" id="pick-card">
+                <div class="pick-card-inner" id="pick-inner">
+                  <div class="face back" id="face-back">
+                    <div class="back-ic">🎤</div>
+                    <div class="back-txt">准备好开唱了吗？</div>
+                    <div class="back-sub">点下方按钮抽取下一首</div>
+                  </div>
+                  <div class="face front" id="face-front">
+                    <div class="front-head">
+                      <div class="front-badge">🎵 为你 Pick</div>
+                      <div class="big" id="pick-title">演员</div>
+                      <div class="who" id="pick-who" onclick="event.stopPropagation(); goToSinger()">薛之谦</div>
+                    </div>
+                    <div class="ly" id="pick-ly" onclick="event.stopPropagation(); openKaraoke()">
+                      <div class="ly-hint" id="ly-hint">轻点歌词进入跟唱 🎤</div>
+                      <div class="ly-scroll" id="ly-scroll">
+                        <div>该配合你演出的我演视而不见</div>
+                        <div class="cur">在逼一个最爱你的人即兴表演</div>
+                        <div>什么时候我们开始收起了底线</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="pick-glow" id="pick-glow"></div>
+            </div>
+
+            <div class="pick-actions" id="pick-actions" style="display:none">
+              <button class="btn btn-primary btn-done" id="btn-played" onclick="markPlayed()">✅ 唱完了</button>
+            </div>
+            <div class="pick-tip" id="pick-tip">点下方 🎲 随机抽一首 · 高星更易被 Pick</div>
+          </div>
+        </div>
+
+        <!-- 我的 -->
+        <div id="tab-me" class="page">
+          <!-- 账号卡：头像 + 名字 + 角色徽章(可点) + 数据概览 -->
+          <div class="me-account">
+            <div class="me-avatar">林</div>
+            <div class="me-info">
+              <div class="me-name">林沐 <span class="role-badge" id="me-role-badge" onclick="toggleRoleMenu()">管理员 ▾</span></div>
+              <div class="me-sub" id="me-role-hint">拥有全部管理权限</div>
+            </div>
+            <div class="me-stats">
+              <div class="me-stat"><b id="me-stat-today">0</b><span>今日唱</span></div>
+              <div class="me-stat"><b id="me-stat-total">0</b><span>累计唱</span></div>
+            </div>
+          </div>
+          <!-- 角色切换（点徽章展开） -->
+          <div class="me-role-switch" id="role-menu" style="display:none">
+            <span style="font-size:11px; color:var(--text-dim)">切换身份查看不同权限界面</span>
+            <div style="display:flex; gap:6px; margin-top:6px">
+              <button class="chip on" id="role-admin" onclick="switchRole('admin')">管理员</button>
+              <button class="chip" id="role-maint" onclick="switchRole('maint')">曲库管家</button>
+              <button class="chip" id="role-user" onclick="switchRole('user')">普通用户</button>
+            </div>
+          </div>
+
+          <!-- 个人数据快捷卡 -->
+          <div class="me-quick">
+            <div class="mq-item" onclick="document.querySelector('.tab[data-tab=library]').click(); setLibView('mine')">
+              <div class="mq-icon">🎵</div>
+              <div class="mq-txt"><div class="mq-v" id="mq-songs">0</div><div class="mq-l">我的曲库</div></div>
+            </div>
+            <div class="mq-item" onclick="document.querySelector('.tab[data-tab=library]').click(); setLibView('mine'); setMineSub('plists')">
+              <div class="mq-icon">🎤</div>
+              <div class="mq-txt"><div class="mq-v" id="mq-ktv">0</div><div class="mq-l">KTV 攒歌</div></div>
+            </div>
+            <div class="mq-item" onclick="openSheet('sheet-history')">
+              <div class="mq-icon">🕐</div>
+              <div class="mq-txt"><div class="mq-v" id="mq-history">0</div><div class="mq-l">点歌记录</div></div>
+            </div>
+          </div>
+
+          <!-- 管理动作（按角色） -->
+          <div id="review-section">
+            <div class="set-card">
+              <div class="set-row" onclick="openSheet('sheet-pending')"><div><div class="label">审核中心</div><div class="hint" id="review-hint">待审核重复歌曲</div></div><span style="color:var(--text-dim)" id="pending-count">3 待处理 ›</span></div>
+            </div>
+          </div>
+          <div id="admin-section">
+            <div class="set-card">
+              <div class="set-row" onclick="openSheet('sheet-users')"><div><div class="label">用户与权限</div><div class="hint">管理用户 · 授予曲库管家</div></div><span style="color:var(--text-dim)">管理 ›</span></div>
+              <div class="set-row"><div><div class="label">开放注册</div><div class="hint">关闭后需管理员邀请</div></div><div class="switch on" onclick="this.classList.toggle('on'); toast('模拟：注册开关已切换')"></div></div>
+              <div class="set-row" onclick="openSheet('sheet-backup')"><div><div class="label">备份管理</div><div class="hint" id="backup-hint">自动备份 · 手动备份 · 恢复</div></div><span style="color:var(--text-dim)">管理 ›</span></div>
+            </div>
+          </div>
+          <div id="user-backup" class="set-card" style="display:none">
+            <div class="set-row"><div><div class="label">数据备份导出</div><div class="hint" id="backup-hint2">导出我的歌曲数据</div></div><button class="btn btn-ghost btn-sm" onclick="toast('模拟：备份已生成')">导出</button></div>
+          </div>
+
+          <!-- 设置（折叠入口） -->
+          <div class="set-card">
+            <div class="set-row" onclick="toggleSettings()"><div><div class="label">设置</div><div class="hint">深色模式 · 安装 · 账号</div></div><span style="color:var(--text-dim)" id="settings-arrow">▾</span></div>
+            <div id="settings-body" style="display:none">
+              <div class="set-row" onclick="openSheet('sheet-mtw-config')"><div><div class="label">刮削源配置</div><div class="hint" id="mtw-status-hint">未配置</div></div><span style="color:var(--text-dim)">配置 ›</span></div>
+              <div class="set-row"><div><div class="label">账号设置</div><div class="hint">修改用户名 / 密码</div></div><button class="btn btn-ghost btn-sm" onclick="toast('模拟：打开账号设置')">修改</button></div>
+              <div class="set-row"><div><div class="label">深色模式</div><div class="hint">跟随系统 / 常亮</div></div><div class="switch on"></div></div>
+              <div class="set-row"><div><div class="label">安装到桌面</div><div class="hint">添加为 PWA 应用</div></div><button class="btn btn-ghost btn-sm" onclick="toast('模拟：弹出安装横幅')">安装</button></div>
+              <div class="set-row"><div><div class="label">版本</div><div class="hint">v0.1.0</div></div><span style="color:var(--text-dim); font-size:13px">话筒递给我</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="batch" id="batch-bar">
+        <span class="count">已选 3 首</span>
+        <div class="batch-row">
+          <button class="btn btn-ghost btn-sm" style="color:var(--accent)" onclick="batchToKtv()">🎤 移到KTV</button>
+          <button class="btn btn-ghost btn-sm" onclick="toast('模拟：移入歌单')">移入歌单</button>
+          <button class="btn btn-ghost btn-sm" onclick="toast('模拟：移出收藏')">移出收藏</button>
+        </div>
+        <div class="batch-row">
+          <button class="btn btn-ghost btn-sm" onclick="openSheet('sheet-batch-edit')">✏️ 批量编辑</button>
+          <button class="btn btn-ghost btn-sm" style="color:var(--accent)" onclick="batchScrape()">✨ 批量刮削</button>
+          <button class="btn btn-ghost btn-sm" onclick="clearSelect()">取消</button>
+        </div>
+      </div>
+
+      <button class="btn-round" id="fab" onclick="openSheet('sheet-add')">＋</button>
+
+      <!-- PWA 安装横幅 -->
+      <div class="pwa-banner" id="pwa-banner">
+        <div class="txt"><b>安装「话筒递给我」</b><br>添加到主屏幕，随时快速打开</div>
+        <button class="btn btn-primary btn-sm" style="width:auto; padding:9px 14px" onclick="hidePwa()">安装</button>
+      </div>
+
+      <div class="tabbar">
+        <button class="tab active" data-tab="library"><span class="ic">🎵</span>曲库</button>
+        <button class="tab tab-pick" data-tab="pick"><span class="pick-btn"><span class="pick-dice">🎲</span>Pick</span></button>
+        <button class="tab" data-tab="me"><span class="ic">👤</span>我的</button>
+      </div>
+    </div>
+
+    <div class="toasts" id="toasts"></div>
+
+    <!-- ===== Sheet：歌曲详情 ===== -->
+    <div class="sheet-mask" id="sheet-song-detail">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <div class="sd-head">
+          <span class="sd-title" id="sd-title"></span>
+          <span class="sd-artist" id="sd-artist"></span>
+        </div>
+        <div class="sd-badges" id="sd-badges"></div>
+        <div class="sd-owner" id="sd-owner"></div>
+        <div class="sd-meta" id="sd-meta"></div>
+
+        <div class="sd-section">我的难度 <span style="font-weight:400; font-size:11px; color:var(--text-dim)" id="sd-diff-hint">（根据演唱记录推断）</span></div>
+        <div style="display:flex; gap:8px; margin-bottom:16px" id="sd-diff">
+          <button type="button" class="chip diff-opt" data-d="easy" onclick="setSongDiff('easy')">简单</button>
+          <button type="button" class="chip diff-opt" data-d="medium" onclick="setSongDiff('medium')">中等</button>
+          <button type="button" class="chip diff-opt" data-d="hard" onclick="setSongDiff('hard')">困难</button>
+          <button type="button" class="chip diff-opt" data-d="" onclick="clearDiffOverride()">自动</button>
+        </div>
+
+        <div class="sd-section">我的评分 <span style="font-weight:400; font-size:11px; color:var(--text-dim)">（点星修改整体把握）</span></div>
+        <div class="sd-stars" id="sd-stars"></div>
+        <div class="sd-plays" id="sd-plays"></div>
+
+        <div class="sd-section" id="sd-note-sec">我的备注</div>
+        <div class="sd-note" id="sd-note"></div>
+
+        <div class="sd-section">歌词</div>
+        <button class="btn btn-ghost" style="width:100%; justify-content:space-between" onclick="toast('模拟：进入歌词编辑器')">
+          <span id="sd-lyric-status">🎤 有歌词 · 原文+音译</span>
+          <span style="color:var(--cyan)">✏️ 编辑 ›</span>
+        </button>
+        <button class="btn btn-ghost" id="sd-scrape-btn" style="width:100%; justify-content:space-between; margin-top:8px; color:var(--accent)" onclick="scrapeSongDetail()">
+          <span>✨ 刮削补全</span>
+          <span>专辑 · 封面 · 歌词</span>
+        </button>
+
+        <div class="sd-section">修改记录</div>
+        <div class="hist" id="sd-hist"></div>
+        <button class="btn btn-ghost" id="sd-rollback-all" style="margin-top:10px" onclick="rollbackAll()">↩ 回退到初始版本</button>
+
+        <div class="sd-actions" id="sd-actions">
+          <button class="btn btn-ghost" id="sd-edit-btn" onclick="toast('模拟：编辑歌曲信息')">✏️ 编辑</button>
+          <button class="btn btn-ghost" id="sd-del-btn" style="color:var(--pink)" onclick="handleDel()">🗑 删除</button>
+          <button class="btn btn-ghost" onclick="toast('模拟：移入歌单')">📋 移入歌单</button>
+          <button class="btn btn-ghost" onclick="toast('模拟：已标记已唱')">✅ 已唱</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：审核中心 ===== -->
+    <div class="sheet-mask" id="sheet-pending">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>审核中心</h3>
+        <div style="font-size:12px; color:var(--text-dim); margin-bottom:12px">用户提交了与曲库重复的歌曲，对比后确认</div>
+        <div id="pending-list"></div>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：审核编辑 ===== -->
+    <div class="sheet-mask" id="sheet-review-edit">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>编辑提交内容</h3>
+        <div class="row2">
+          <div class="field"><label>歌名 *</label><input id="re-title"></div>
+          <div class="field"><label>歌手 *</label><input id="re-artist"></div>
+        </div>
+        <div class="row2">
+          <div class="field"><label>语种</label>
+            <select id="re-lang"><option>华语</option><option>粤语</option><option>英文</option><option>日韩</option></select>
+          </div>
+          <div class="field"><label>曲风</label>
+            <select id="re-genre"><option>抒情</option><option>摇滚</option><option>说唱</option><option>流行</option><option>古风</option></select>
+          </div>
+        </div>
+        <div class="field"><label>评分</label><div class="stars-pick" id="re-stars">
+          <span onclick="reStars(1)">☆</span><span onclick="reStars(2)">☆</span><span onclick="reStars(3)">☆</span><span onclick="reStars(4)">☆</span><span onclick="reStars(5)">☆</span>
+        </div></div>
+        <div style="display:flex; gap:8px; margin-top:14px">
+          <button class="btn btn-ghost" style="flex:1" onclick="closeSheet('sheet-review-edit')">取消</button>
+          <button class="btn btn-primary" style="flex:1" onclick="saveReviewEdit()">保存，采用此版本</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：用户与权限 ===== -->
+    <div class="sheet-mask" id="sheet-users">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>用户与权限</h3>
+        <div style="font-size:12px; color:var(--text-dim); margin-bottom:8px">授予「曲库管家」后可编辑全局歌曲；可单独控制其删除权限</div>
+        <div id="user-list"></div>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：添加歌曲 ===== -->
+    <div class="sheet-mask" id="sheet-add">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>添加歌曲</h3>
+        <div class="row2">
+          <div class="field"><label>歌名 *</label><input id="add-title" placeholder="歌名"></div>
+          <div class="field"><label>歌手 *</label><input id="add-artist" placeholder="歌手"></div>
+        </div>
+        <div class="row2">
+          <div class="field"><label>语种</label><select><option>华语</option><option>粤语</option><option>英文</option><option>日韩</option></select></div>
+          <div class="field"><label>曲风</label><select><option>抒情</option><option>摇滚</option><option>说唱</option><option>流行</option></select></div>
+        </div>
+        <div class="field"><label>难度</label>
+          <div style="display:flex; gap:8px">
+            <button type="button" class="chip on" id="add-diff-easy" onclick="pickDiff('easy')">简单</button>
+            <button type="button" class="chip" id="add-diff-medium" onclick="pickDiff('medium')">中等</button>
+            <button type="button" class="chip" id="add-diff-hard" onclick="pickDiff('hard')">困难</button>
+          </div>
+        </div>
+        <div class="field"><label>备注</label><textarea rows="2" placeholder="如：副歌高音小心"></textarea></div>
+        <div class="field" style="display:flex; align-items:center; gap:10px; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px 14px">
+          <div style="flex:1"><div style="font-size:13px; font-weight:600">✨ 自动刮削补全</div><div style="font-size:11px; color:var(--text-dim); margin-top:2px">自动拉取歌词、语种、曲风（需要配置元数据源）</div></div>
+          <div class="switch on" id="scrape-switch" onclick="toggleScrape()"></div>
+        </div>
+        <div class="field"><label>歌词（可选）</label><button class="btn btn-ghost btn-sm" style="width:100%" onclick="openSheet('sheet-lyric-edit'); closeSheet('sheet-add')">✏️ 编辑歌词 / 导入 LRC</button></div>
+        <div class="mock-note" style="margin:0 0 12px">💡 评分无需现在填——唱完后在"唱完了"时会提示你评分，数据更真实</div>
+        <div style="display:flex; gap:8px">
+          <button class="btn btn-ghost" style="flex:1" onclick="submitAdd(true)">保存并继续添加</button>
+          <button class="btn btn-primary" style="flex:1" onclick="submitAdd(false)">添加</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：重复确认 ===== -->
+    <div class="sheet-mask" id="sheet-dup">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>曲库中已有这首歌</h3>
+        <div class="dup-panel" style="display:block; background:none; border:1px solid var(--border)">
+          <div class="dup-row" style="margin-bottom:0">
+            <div class="dup-info">
+              <div class="dup-name" id="dup-name">演员 · 薛之谦</div>
+              <div class="dup-sub" id="dup-sub">添加者 林沐 · 华语 · 抒情</div>
+            </div>
+          </div>
+        </div>
+        <div class="dup-note" style="color:var(--text-dim); margin-top:12px">直接复用可避免重复数据；继续新增将进入审核，管理员确认后才能使用。</div>
+        <div style="display:flex; gap:8px; margin-top:8px">
+          <button class="btn btn-ghost" style="flex:1" onclick="toast('模拟：已提交审核，等待管理员处理'); closeSheet('sheet-dup'); closeSheet('sheet-add')">继续新增</button>
+          <button class="btn btn-primary" style="flex:1" onclick="confirmReuse()">复用</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：歌词编辑器 ===== -->
+    <div class="sheet-mask" id="sheet-lyric-edit">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>歌词编辑器</h3>
+        <div class="mock-note">原型说明：每行「原文 + 音译」双输入框，点 ＋ 插入行。时间戳由"打点"自动生成，无需手写 [mm:ss]</div>
+        <div class="ly-editor">
+          <div class="ly-row"><span class="time">[00:12]</span><input value="该配合你演出的我演视而不见"><input value="gāi pèi hé nǐ yǎn chū de wǒ yǎn shì ér bù jiàn"><button class="add" onclick="toast('模拟：插入新行')">＋</button></div>
+          <div class="ly-row"><span class="time">[00:16]</span><input value="在逼一个最爱你的人即兴表演"><input value="zài bī yí gè zuì ài nǐ de rén jí xìng biǎo yǎn"><button class="add" onclick="toast('模拟：插入新行')">＋</button></div>
+          <div class="ly-row"><span class="time">[00:21]</span><input value="什么时候我们开始收起了底线"><input value="shén me shí hòu wǒ men kāi shǐ shōu qǐ le dǐ xiàn"><button class="add" onclick="toast('模拟：插入新行')">＋</button></div>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:12px">
+          <button class="btn btn-ghost" style="flex:1" onclick="toast('模拟：导入 .lrc 文件')">📂 导入 LRC</button>
+          <button class="btn btn-ghost" style="flex:1" onclick="toast('模拟：语音打点')">⏱ 打点</button>
+        </div>
+        <button class="btn btn-primary" style="margin-top:8px" onclick="toast('模拟：歌词已保存'); closeSheet('sheet-lyric-edit')">保存歌词</button>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：导入 ===== -->
+    <div class="sheet-mask" id="sheet-import">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>导入歌曲</h3>
+        <div style="border:2px dashed var(--border); border-radius:16px; padding:30px; text-align:center; color:var(--text-dim)">
+          <div style="font-size:36px; margin-bottom:8px">📂</div>
+          拖拽 CSV / JSON 文件到此处<br><span style="font-size:12px">或 <a href="#" style="color:var(--cyan)" onclick="toast('模拟：选择文件')">点击选择</a></span>
+        </div>
+        <div style="font-size:12px; color:var(--text-dim); line-height:1.9; margin-top:12px">
+          支持列：歌名、歌手、语种、曲风、星级<br>
+          <a href="#" style="color:var(--cyan)" onclick="toast('模拟：下载空模板')">⬇️ 下载空模板</a>
+        </div>
+        <div class="import-result" id="import-result" style="display:none">
+          <div class="ir-title">导入完成，发现重复歌曲</div>
+          <div class="ir-row"><span>新增成功</span><b id="ir-new">0</b></div>
+          <div class="ir-row"><span>已在曲库 · 可直接复用</span><b id="ir-reuse" style="color:var(--accent)">0</b></div>
+          <div class="ir-row"><span>重复 · 需管理员审核</span><b id="ir-pending" style="color:var(--warn)">0</b></div>
+        </div>
+        <button class="btn btn-primary" style="margin-top:12px" onclick="doImport()">开始导入</button>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：忘记密码 ===== -->
+    <div class="sheet-mask" id="sheet-forgot">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>🔑 忘记密码</h3>
+        <div style="font-size:13px; color:var(--text-dim); line-height:1.8; margin-bottom:14px">
+          本系统为自托管部署，找回密码需联系管理员：<br>
+          1. 请管理员登录后在「用户与权限」中为你的账号重置密码<br>
+          2. 重置后可重新登录，你的歌曲/歌单数据不受影响
+        </div>
+        <button class="btn btn-primary" onclick="closeSheet('sheet-forgot')">知道了</button>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：重置密码 ===== -->
+    <div class="sheet-mask" id="sheet-reset-pwd">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>🔑 重置密码</h3>
+        <div style="font-size:13px; color:var(--text-dim); margin-bottom:12px" id="reset-user-name"></div>
+        <div class="field"><label>新密码 *</label><input type="password" id="reset-new-pwd" placeholder="至少 6 位"></div>
+        <div class="field"><label>确认新密码 *</label><input type="password" id="reset-confirm-pwd" placeholder="再次输入新密码"></div>
+        <button class="btn btn-primary" onclick="confirmResetPwd()">确认重置</button>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：新建歌单 ===== -->
+    <div class="sheet-mask" id="sheet-pl-new">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>新建歌单</h3>
+        <div class="field"><label>歌单名称 *</label><input placeholder="如：生日局"></div>
+        <div class="field"><label>邀请协作者</label><input placeholder="输入用户名回车添加"></div>
+        <button class="btn btn-primary" onclick="toast('模拟：歌单已创建'); closeSheet('sheet-pl-new')">创建</button>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：加入歌单 ===== -->
+    <div class="sheet-mask" id="sheet-add-playlist">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>加入歌单</h3>
+        <div style="font-size:12px; color:var(--text-dim); margin-bottom:10px" id="ap-song-name"></div>
+        <button class="pl-card" style="width:100%; text-align:left; border-color:rgba(124,92,255,.5); background:linear-gradient(135deg, rgba(124,92,255,.12), rgba(255,79,216,.08))" onclick="addToKtv()">
+          <div class="pl-cover ktv-cover">🎤</div>
+          <div class="pl-info">
+            <div class="pl-name">下一次 KTV</div>
+            <div class="pl-sub">⚡ 一键为下次 KTV 攒歌</div>
+          </div>
+          <span style="color:var(--accent)">＋</span>
+        </button>
+        <div style="margin:6px 0 8px; color:var(--text-dim); font-size:11px">或选择已有歌单</div>
+        <button class="pl-card" style="width:100%; text-align:left" onclick="toast('模拟：已加入「生日局」'); closeSheet('sheet-add-playlist')">
+          <div class="pl-cover">🎂</div>
+          <div class="pl-info">
+            <div class="pl-name">生日局</div>
+            <div class="pl-sub">12 首 · 协作中</div>
+          </div>
+          <span style="color:var(--text-dim)">＋</span>
+        </button>
+        <button class="pl-card" style="width:100%; text-align:left" onclick="toast('模拟：已加入「好友合唱」'); closeSheet('sheet-add-playlist')">
+          <div class="pl-cover">🎤</div>
+          <div class="pl-info">
+            <div class="pl-name">好友合唱</div>
+            <div class="pl-sub">8 首 · 协作中</div>
+          </div>
+          <span style="color:var(--text-dim)">＋</span>
+        </button>
+        <button class="btn btn-ghost" style="width:100%; margin-top:8px" onclick="closeSheet('sheet-add-playlist'); openSheet('sheet-pl-new')">＋ 新建歌单</button>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：歌单详情 ===== -->
+    <div class="sheet-mask" id="sheet-pl-detail">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3 id="pl-detail-title">🎂 生日局</h3>
+        <div class="mock-note" id="pl-detail-note">原型说明：拖动 ⠿ 排序 · 从曲库加歌 · 邀请协作者共同编辑</div>
+        <div id="pl-rows"></div>
+        <div style="display:flex; gap:8px; margin-top:8px">
+          <button class="btn btn-ghost btn-sm" style="flex:1" onclick="toast('模拟：从曲库选歌')">＋ 加歌</button>
+          <button class="btn btn-ghost btn-sm" style="flex:1" id="pl-collab-btn" onclick="openSheet('sheet-collab')">👥 协作</button>
+          <button class="btn btn-ghost btn-sm" style="flex:1" onclick="toast('模拟：移除歌曲')">🗑 移除歌曲</button>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="pl-del-btn" style="width:100%; margin-top:10px; color:var(--pink); border-color:rgba(255,79,216,.3)" onclick="askDelPlaylist()">🗑 删除歌单</button>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：协作者管理 ===== -->
+    <div class="sheet-mask" id="sheet-collab">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>👥 协作者管理</h3>
+        <div style="font-size:12px; color:var(--text-dim); margin-bottom:10px">协作者可共同编辑歌单「生日局」</div>
+        <div id="collab-list"></div>
+        <div class="sd-section" style="margin-top:6px">邀请协作者</div>
+        <div class="search" style="margin-bottom:8px">🔍 <input id="collab-search" placeholder="搜索用户" oninput="renderCollabCandidates()"></div>
+        <div id="collab-candidates"></div>
+        <button class="btn btn-primary" id="collab-confirm" style="margin-top:10px" onclick="confirmCollab()">确认邀请</button>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：点歌记录 ===== -->
+    <div class="sheet-mask" id="sheet-history">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>🕐 点歌记录</h3>
+        <div class="hist-stats" id="hist-stats"></div>
+        <div class="chips" style="margin-bottom:10px">
+          <span class="chip on">全部</span><span class="chip">本周</span><span class="chip">已唱</span>
+        </div>
+        <div id="history-list"></div>
+        <button class="btn btn-ghost" style="margin-top:10px" onclick="toast('模拟：已清空记录')">🗑 清空记录</button>
+      </div>
+    </div>
+
+    <!-- ===== 全屏跟唱 ===== -->
+    <div class="karaoke" id="karaoke">
+      <div class="karaoke-head">
+        <button class="btn btn-ghost btn-sm" onclick="closeKaraoke()">✕</button>
+        <div class="t" id="k-title">演员</div>
+        <div class="s" id="k-who">薛之谦</div>
+      </div>
+      <div class="chips" style="justify-content:center; padding:6px 0">
+        <span class="chip on" id="k-lang-orig" onclick="kMode('orig')">原文</span>
+        <span class="chip" id="k-lang-trans" onclick="kMode('trans')">音译</span>
+      </div>
+      <div class="karaoke-lyrics" id="k-lyrics"></div>
+      <div style="text-align:center; font-size:11px; color:var(--text-dim); padding-bottom:4px">轻点任意一行可手动调整歌词位置</div>
+      <div class="karaoke-foot">
+        <button class="btn btn-ghost" onclick="markPlayedFromKaraoke()">✅ 唱完了</button>
+        <button class="btn btn-primary" onclick="doPick()">⏭ 下一首</button>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：KTV 歌单唱完 ===== -->
+    <div class="sheet-mask" id="sheet-ktv-done">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>🎉 「下一次 KTV」唱完了</h3>
+        <div style="font-size:13px; color:var(--text-dim); line-height:1.8; margin-bottom:16px">攒的歌都唱完啦！继续抽全部曲库，还是清空重新攒？</div>
+        <div style="display:flex; gap:8px">
+          <button class="btn btn-ghost" style="flex:1" onclick="ktvDone('clear')">🧹 清空重开</button>
+          <button class="btn btn-primary" style="flex:1" onclick="ktvDone('global')">🎲 抽全部曲库</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：唱完评分 ===== -->
+    <div class="sheet-mask" id="sheet-rate">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>唱完啦 🎉</h3>
+        <div style="font-size:13px; color:var(--text-dim); margin-bottom:14px" id="rate-song"></div>
+        <div class="field"><label>唱得怎么样？</label></div>
+        <div class="stars-pick" id="rate-stars">
+          <span onclick="rateStars(1)">☆</span><span onclick="rateStars(2)">☆</span><span onclick="rateStars(3)">☆</span><span onclick="rateStars(4)">☆</span><span onclick="rateStars(5)">☆</span>
+        </div>
+        <div class="field" style="margin-top:14px"><label>备注（可选）</label><textarea id="rate-note" rows="2" placeholder="如：副歌高音没顶上去"></textarea></div>
+        <div class="rate-collect" id="rate-collect" style="display:none; align-items:center; justify-content:space-between; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px 14px; margin-top:12px">
+          <div><div style="font-size:13px; font-weight:600">收录到我的曲库</div><div style="font-size:11px; color:var(--text-dim); margin-top:2px">好听的歌收进来，下次更容易被 Pick</div></div>
+          <div class="switch on" id="rate-collect-switch" onclick="toggleRateCollect()"></div>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:14px">
+          <button class="btn btn-ghost" style="flex:1" onclick="submitRate(true)">跳过</button>
+          <button class="btn btn-primary" style="flex:1" onclick="submitRate(false)">确定，下一首</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：筛选 ===== -->
+    <div class="sheet-mask" id="sheet-filter">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>🎲 筛选</h3>
+        <div class="fl-group"><div class="fl-label">语种</div>
+          <div class="fl-options" id="fl-lang"></div>
+        </div>
+        <div class="fl-group"><div class="fl-label">曲风</div>
+          <div class="fl-options" id="fl-genre"></div>
+        </div>
+        <div class="fl-group"><div class="fl-label">难度</div>
+          <div class="fl-options" id="fl-diff"></div>
+        </div>
+        <div class="fl-group"><div class="fl-label">星级</div>
+          <div class="fl-options" id="fl-rating"></div>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:16px">
+          <button class="btn btn-ghost" style="flex:1" onclick="resetFilter()">重置</button>
+          <button class="btn btn-primary" style="flex:1" onclick="applyFilter()">应用</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：批量编辑 ===== -->
+    <div class="sheet-mask" id="sheet-batch-edit">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>✏️ 批量编辑</h3>
+        <div style="font-size:12px; color:var(--text-dim); margin-bottom:12px">将应用到已选的 <span style="color:var(--accent); font-weight:700" id="be-count">0</span> 首歌</div>
+        <div class="field"><label>难度</label>
+          <div style="display:flex; gap:8px">
+            <button type="button" class="chip be-opt" data-be-diff="easy" onclick="bePickDiff('easy')">简单</button>
+            <button type="button" class="chip be-opt" data-be-diff="medium" onclick="bePickDiff('medium')">中等</button>
+            <button type="button" class="chip be-opt" data-be-diff="hard" onclick="bePickDiff('hard')">困难</button>
+          </div>
+        </div>
+        <div class="field"><label>曲风</label>
+          <select id="be-genre"><option value="">不修改</option><option>抒情</option><option>摇滚</option><option>说唱</option><option>流行</option><option>古风</option></select>
+        </div>
+        <div class="field"><label>星级</label>
+          <select id="be-stars"><option value="0">不修改</option><option value="1">★1</option><option value="2">★2</option><option value="3">★3</option><option value="4">★4</option><option value="5">★5</option></select>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:14px">
+          <button class="btn btn-ghost" style="flex:1" onclick="closeSheet('sheet-batch-edit')">取消</button>
+          <button class="btn btn-primary" style="flex:1" onclick="applyBatchEdit()">应用到 N 首</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：刮削源配置 ===== -->
+    <div class="sheet-mask" id="sheet-mtw-config">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>刮削源配置</h3>
+        <div style="font-size:12px; color:var(--text-dim); margin-bottom:12px">配置后，添加歌曲时可自动补全专辑、封面、歌词</div>
+        <div class="field"><label>元数据源类型</label>
+          <select id="mtw-type">
+            <option value="none">未配置</option>
+            <option value="mtw">Music Tag Web (MTW)</option>
+          </select>
+        </div>
+        <div id="mtw-fields">
+          <div class="field"><label>MTW 地址</label><input id="mtw-url" placeholder="如 http://192.168.10.150:8016" value="http://192.168.10.150:8016"></div>
+          <div class="field"><label>用户名</label><input id="mtw-user" placeholder="MTW 登录用户名" value="linyue"></div>
+          <div class="field"><label>密码</label><input id="mtw-pass" type="password" placeholder="MTW 登录密码" value=""></div>
+          <div class="field"><label>歌词源</label>
+            <select id="mtw-resource">
+              <option value="netease">网易云音乐</option>
+              <option value="qmusic">QQ 音乐</option>
+            </select>
+          </div>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:14px">
+          <button class="btn btn-ghost" style="flex:1" onclick="testMtw()">🔌 测试连接</button>
+          <button class="btn btn-primary" style="flex:1" onclick="saveMtw()">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：备份管理 ===== -->
+    <div class="sheet-mask" id="sheet-backup">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>💾 备份管理</h3>
+        <div class="field"><label>自动备份</label>
+          <div style="display:flex; align-items:center; justify-content:space-between; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px 14px">
+            <div><div style="font-size:13px; font-weight:600">每日自动备份</div><div style="font-size:11px; color:var(--text-dim); margin-top:2px">保留最近 7 份 · 自动清理旧备份</div></div>
+            <div class="switch on" onclick="this.classList.toggle('on'); toast('自动备份开关已切换')"></div>
+          </div>
+        </div>
+        <div style="display:flex; gap:8px; margin:12px 0">
+          <button class="btn btn-primary" style="flex:1" onclick="manualBackup()">立即备份</button>
+          <button class="btn btn-ghost" style="flex:1" onclick="toast('模拟：恢复配置说明')">恢复</button>
+        </div>
+        <div class="sd-section">备份列表</div>
+        <div id="backup-list"></div>
+        <div style="font-size:11px; color:var(--text-dim); line-height:1.7; margin-top:8px">备份内容：SQLite 数据库 + 歌词 + 封面缓存，存于 /data/backups/</div>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：刮削候选选择 ===== -->
+    <div class="sheet-mask" id="sheet-scrape-candidates">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>✨ 找到多个匹配版本</h3>
+        <div style="font-size:12px; color:var(--text-dim); margin-bottom:10px" id="sc-can-title"></div>
+        <div id="sc-can-list"></div>
+        <div style="display:flex; gap:8px; margin-top:12px">
+          <button class="btn btn-ghost" style="flex:1" onclick="closeSheet('sheet-scrape-candidates')">手动填写</button>
+          <button class="btn btn-primary" style="flex:1" onclick="useScrapeCandidate()">使用所选</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：批量刮削结果 ===== -->
+    <div class="sheet-mask" id="sheet-scrape-result">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3>✨ 批量刮削完成</h3>
+        <div class="import-result" style="display:block; margin-top:8px">
+          <div class="ir-row"><span>刮削成功 · 已补全</span><b id="sr-ok" style="color:var(--green)">0</b></div>
+          <div class="ir-row"><span>多候选 · 需确认</span><b id="sr-multi" style="color:var(--accent)">0</b></div>
+          <div class="ir-row"><span>无匹配 · 未补全</span><b id="sr-none" style="color:var(--warn)">0</b></div>
+          <div class="ir-row"><span>失败 · 可重试</span><b id="sr-fail" style="color:var(--pink)">0</b></div>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:14px">
+          <button class="btn btn-ghost" style="flex:1" onclick="closeSheet('sheet-scrape-result')">完成</button>
+          <button class="btn btn-primary" style="flex:1" onclick="retryScrapeFail()">重试失败</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Sheet：删除确认 ===== -->
+    <div class="sheet-mask" id="sheet-del-confirm">
+      <div class="sheet">
+        <div class="sheet-grab"></div>
+        <h3 id="del-confirm-title">删除</h3>
+        <div style="font-size:13px; color:var(--text-dim); line-height:1.8; margin-bottom:16px" id="del-confirm-desc"></div>
+        <div style="display:flex; gap:8px">
+          <button class="btn btn-ghost" style="flex:1" onclick="closeSheet('sheet-del-confirm')">取消</button>
+          <button class="btn btn-primary" style="flex:1; background:linear-gradient(135deg, #ff4f6a, #ff2d55)" id="del-confirm-btn" onclick="confirmDelAction()">确认删除</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const HISTORY = [
+    {date:'周日', title:'晴天', artist:'周杰伦', status:'已唱 ★4', note:''},
+    {date:'周六', title:'富士山下', artist:'陈奕迅', status:'已唱 ★3', note:'副歌没顶上去'},
+    {date:'周六', title:'演员', artist:'薛之谦', status:'已唱 ★5', note:'唱得稳'},
+    {date:'周五', title:'海阔天空', artist:'Beyond', status:'未唱', note:''},
+    {date:'周四', title:'Lemon', artist:'米津玄师', status:'未唱', note:''},
+  ];
+  const SONGS = [
+    {id:1, t:'演员', a:'薛之谦', lang:'华语', genre:'抒情', difficulty:'easy', mine:true, stars:5, owner:'林沐', ownerRole:'管理员', inMy:true, hasLy:true, recent:true, note:'副歌高音小心，唱 C 调稳', plays:12,
+      hist:[['08-06 14:32','林沐','修改：曲风 流行 → 抒情'],['08-01 09:12','林沐','创建歌曲']]},
+    {id:2, t:'富士山下', a:'陈奕迅', lang:'粤语', genre:'抒情', difficulty:'medium', mine:true, stars:4, owner:'阿杰', ownerRole:'用户', inMy:true, hasLy:true, recent:false, note:'', plays:6,
+      hist:[['08-04 20:15','阿杰','修改：语种 华语 → 粤语'],['07-28 11:40','阿杰','创建歌曲']]},
+    {id:3, t:'晴天', a:'周杰伦', lang:'华语', genre:'流行', difficulty:'easy', mine:true, stars:5, owner:'小苏', ownerRole:'曲库管家', inMy:true, hasLy:true, recent:true, note:'', plays:9,
+      hist:[['08-05 16:00','小苏','修改：备注 无 → 无'],['07-20 10:05','小苏','创建歌曲']]},
+    {id:4, t:'海阔天空', a:'Beyond', lang:'粤语', genre:'摇滚', difficulty:'hard', mine:false, stars:0, owner:'林沐', ownerRole:'管理员', inMy:false, hasLy:false, recent:false, note:'', plays:0,
+      hist:[['08-03 09:00','林沐','创建歌曲']]},
+    {id:5, t:'青花瓷', a:'周杰伦', lang:'华语', genre:'古风', difficulty:'medium', isNew:true, mine:false, stars:0, owner:'阿杰', ownerRole:'用户', inMy:false, hasLy:false, recent:false, note:'', plays:0,
+      hist:[['08-02 22:18','阿杰','创建歌曲']]},
+    {id:6, t:'Someone Like You', a:'Adele', lang:'英文', genre:'流行', difficulty:'medium', isNew:true, mine:true, stars:4, owner:'小苏', ownerRole:'曲库管家', inMy:true, hasLy:true, recent:false, note:'主歌低音注意', plays:3,
+      hist:[['07-30 15:45','小苏','创建歌曲']]},
+    {id:7, t:'Lemon', a:'米津玄师', lang:'日韩', genre:'流行', difficulty:'medium', isNew:true, mine:false, stars:0, owner:'阿杰', ownerRole:'用户', inMy:false, hasLy:true, recent:false, note:'', plays:0,
+      hist:[['07-26 13:30','阿杰','创建歌曲']]},
+    {id:8, t:'光年之外', a:'邓紫棋', lang:'华语', genre:'流行', difficulty:'hard', mine:false, stars:0, owner:'小苏', ownerRole:'曲库管家', inMy:false, hasLy:false, recent:false, note:'', plays:0,
+      hist:[['07-25 19:02','小苏','创建歌曲']]},
+  ];
+  const LANGS = ['全部','华语','粤语','英文','日韩'];
+  const DIFF_LABEL = {easy:'简单', medium:'中等', hard:'困难'};
+  const DIFF_CLASS = {easy:'diff-easy', medium:'diff-medium', hard:'diff-hard'};
+  const DIFF_LEVEL = {easy:0, medium:1, hard:2};
+  const DIFF_BY_LEVEL = ['easy','medium','hard'];
+  const SCENES = {
+    mine: [['all','全部'],['strong','⭐ 拿手'],['challenge','🔥 想挑战'],['recent','🕐 近期唱过'],['note','📌 有备注'],['new','✨ 最近添加']],
+    all: [['all','全部'],['high','⭐ 高分'],['hard','🔥 高难度'],['new','✨ 最近添加']],
+  };
+  let currentScene = 'all';
+  function renderSceneChips(){
+    const scenes = SCENES[libView==='mine'?'mine':'all'];
+    if(currentScene === 'all' || !scenes.some(s=>s[0]===currentScene)) currentScene = 'all';
+    document.getElementById('scene-chips').innerHTML = scenes.map(s=>`<span class="chip ${s[0]===currentScene?'on':''}" onclick="setScene('${s[0]}')">${s[1]}</span>`).join('');
+  }
+  function setScene(sc){
+    currentScene = sc;
+    renderSceneChips();
+    renderLibrary();
+  }
+
+  let libView = 'mine', currentDetail = null;
+  let singerFilter = '';
+
+  let currentCanAdd = true;
+  let addDifficulty = 'easy';
+  let scrapeEnable = false;
+  function toggleScrape(){
+    scrapeEnable = !scrapeEnable;
+    document.getElementById('scrape-switch').classList.toggle('on', scrapeEnable);
+    toast(scrapeEnable ? '已开启自动刮削补全' : '已关闭自动刮削补全');
+  }
+  function pickDiff(d){
+    addDifficulty = d;
+    document.getElementById('add-diff-easy').classList.toggle('on', d==='easy');
+    document.getElementById('add-diff-medium').classList.toggle('on', d==='medium');
+    document.getElementById('add-diff-hard').classList.toggle('on', d==='hard');
+  }
+  let lastDupHit = null;
+  function confirmReuse(){
+    if(lastDupHit){
+      lastDupHit.mine = true;
+      lastDupHit.inMy = true;
+      toast('已复用「'+lastDupHit.t+'」到我的曲库');
+      renderLibrary();
+    }
+    closeSheet('sheet-dup');
+    closeSheet('sheet-add');
+  }
+  function submitAdd(cont){
+    if(!currentCanAdd){
+      toast('当前角色无添加歌曲权限，请联系管理员');
+      return;
+    }
+    const t = (document.getElementById('add-title').value||'').trim();
+    const a = (document.getElementById('add-artist').value||'').trim();
+    if(!t || !a){ toast('请输入歌名和歌手'); return; }
+    const hit = SONGS.find(s=> s.t===t && s.a===a);
+    if(hit){
+      lastDupHit = hit;
+      document.getElementById('dup-name').textContent = `${hit.t} · ${hit.a}`;
+      document.getElementById('dup-sub').textContent = `添加者 ${hit.owner} · ${hit.lang} · ${hit.genre}`;
+      openSheet('sheet-dup');
+    } else {
+      SONGS.push({
+        id: Date.now(), t, a, lang:'华语', genre:'流行', difficulty: addDifficulty,
+        mine:true, inMy:true, stars:0, owner: currentRole==='admin'?'林沐':currentRole==='maint'?'小苏':'阿杰',
+        ownerRole: currentRole==='admin'?'管理员':currentRole==='maint'?'曲库管家':'用户',
+        hasLy:false, recent:false, note:'', plays:0,
+        hist:[[getToday(), currentRole==='admin'?'林沐':currentRole==='maint'?'小苏':'阿杰','创建歌曲']],
+      });
+      if(scrapeEnable){
+        const s = SONGS.find(x=>x.t===t && x.a===a);
+        if(s){
+          s.hasLy = true;
+          s.lang = '华语';
+          s.genre = '流行';
+        }
+        toast('✨ 已自动刮削补全：歌词、语种、曲风');
+      } else {
+        toast('已添加「'+t+'」并进入我的曲库');
+      }
+      if(cont){
+        // 保存并继续：清空表单留在表单
+        document.getElementById('add-title').value = '';
+        document.getElementById('add-artist').value = '';
+      } else {
+        closeSheet('sheet-add');
+      }
+      renderLibrary();
+    }
+  }
+  function getToday(){
+    const d = new Date();
+    const mm = String(d.getMonth()+1).padStart(2,'0');
+    const dd = String(d.getDate()).padStart(2,'0');
+    return `${mm}-${dd}`;
+  }
+  function resetAddForm(){
+    document.getElementById('add-title').value='';
+    document.getElementById('add-artist').value='';
+  }
+  const USERS = [
+    {id:1, name:'林沐', role:'admin', canDelete:true, canAdd:true},
+    {id:2, name:'阿杰', role:'user', canDelete:false, canAdd:true},
+    {id:3, name:'小苏', role:'maint', canDelete:true, canAdd:true},
+  ];
+
+  const PENDING = [
+    {
+      title:'光年之外', submitter:'阿杰',
+      submit:{t:'光年之外', a:'邓紫棋', lang:'华语', genre:'流行', stars:'★★★'},
+      exist:{t:'光年之外', a:'邓紫棋', lang:'华语', genre:'流行', stars:'—'},
+    },
+    {
+      title:'晴天', submitter:'小苏',
+      submit:{t:'晴天', a:'周杰伦', lang:'华语', genre:'流行', stars:'★★★★'},
+      exist:{t:'晴天', a:'周杰伦', lang:'华语', genre:'流行', stars:'—'},
+    },
+    {
+      title:'海阔天空', submitter:'阿杰',
+      submit:{t:'海阔天空', a:'Beyond', lang:'粤语', genre:'摇滚', stars:'★★★★'},
+      exist:{t:'海阔天空', a:'Beyond', lang:'粤语', genre:'摇滚', stars:'—'},
+    },
+  ];
+  function renderPending(){
+    const list = document.getElementById('pending-list');
+    const cnt = document.getElementById('pending-count');
+    if(cnt) cnt.textContent = `${PENDING.length} 待处理 ›`;
+    if(!PENDING.length){
+      list.innerHTML = `<div style="text-align:center; color:var(--text-dim); padding:30px 0; font-size:13px">没有待审核的提交</div>`;
+      return;
+    }
+    list.innerHTML = PENDING.map((p,i)=>{
+      const fields = [
+        ['歌名', p.submit.t, p.exist.t],
+        ['歌手', p.submit.a, p.exist.a],
+        ['语种', p.submit.lang, p.exist.lang],
+        ['曲风', p.submit.genre, p.exist.genre],
+        ['评分', p.submit.stars, p.exist.stars],
+      ];
+      return `
+      <div class="pending-card">
+        <div class="pc-head">
+          <span class="pc-title">「${p.title}」与曲库重复</span>
+          <span class="dup-tag">待审核</span>
+        </div>
+        <div class="pc-who">由 ${p.submitter} 提交 · 与曲库已有歌曲重复</div>
+        <div class="pc-grid">
+          <div class="pc-col submit">
+            <div class="pc-col-label">用户提交</div>
+            ${fields.map(f=>`<div class="pc-field"><span class="k">${f[0]}</span><span class="v">${f[1]}</span></div>`).join('')}
+          </div>
+          <div class="pc-col exist">
+            <div class="pc-col-label">曲库已有</div>
+            ${fields.map(f=>{ const same = f[1]===f[2]; return `<div class="pc-field"><span class="k">${f[0]}</span><span class="v ${same?'same':'diff'}">${same?'✓ ':''}${f[2]}</span></div>`; }).join('')}
+          </div>
+        </div>
+        <div class="pending-actions">
+          ${currentRole==='admin' ? `<button class="btn-x" onclick="editPending(${i})">✏️ 编辑</button>` : ''}
+          <button class="btn-x" onclick="rejectPending(${i})">拒绝</button>
+          ${currentRole==='admin' ? `<button class="btn-x" onclick="replacePending(${i})">替换</button>` : ''}
+          <button class="btn-check" onclick="approvePending(${i})">合并到曲库</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+  function editPending(i){
+    currentReview = PENDING[i];
+    document.getElementById('re-title').value = currentReview.submit.t;
+    document.getElementById('re-artist').value = currentReview.submit.a;
+    document.getElementById('re-lang').value = currentReview.submit.lang;
+    document.getElementById('re-genre').value = currentReview.submit.genre;
+    const stars = String(currentReview.submit.stars).replace(/★/g,'').length;
+    reStars(5 - stars);
+    openSheet('sheet-review-edit');
+  }
+  let reStar = 0;
+  let currentReview = null;
+  function reStars(n){
+    reStar = n;
+    document.getElementById('re-stars').innerHTML = [1,2,3,4,5].map(i=>`<span onclick="reStars(${i})">${i<=n?'★':'☆'}</span>`).join('');
+  }
+  function saveReviewEdit(){
+    currentReview.submit.t = document.getElementById('re-title').value.trim() || currentReview.submit.t;
+    currentReview.submit.a = document.getElementById('re-artist').value.trim() || currentReview.submit.a;
+    currentReview.submit.lang = document.getElementById('re-lang').value;
+    currentReview.submit.genre = document.getElementById('re-genre').value;
+    currentReview.submit.stars = '★'.repeat(reStar) || currentReview.submit.stars;
+    closeSheet('sheet-review-edit');
+    replacePending(PENDING.indexOf(currentReview));
+  }
+  function replacePending(i){
+    const p = PENDING[i];
+    PENDING.splice(i,1);
+    renderPending();
+    toast('已替换曲库歌曲为提交版本');
+  }
+  function rejectPending(i){
+    PENDING.splice(i,1);
+    renderPending();
+    toast('已拒绝该提交');
+  }
+  function approvePending(i){
+    const p = PENDING[i];
+    PENDING.splice(i,1);
+    renderPending();
+    toast('已通过，「'+p.title+'」合并到曲库');
+  }
+  function renderUsers(){
+    document.getElementById('user-list').innerHTML = USERS.map(u=>`
+      <div class="user-row">
+        <div class="u-info">
+          <div class="u-name">${u.name} <span class="role-badge ${u.role==='admin'?'role-admin':u.role==='maint'?'role-maint':'role-user'}">${u.role==='admin'?'管理员':u.role==='maint'?'曲库管家':'普通用户'}</span></div>
+          <div class="u-sub">${u.role==='maint'
+            ? (u.canDelete?'可编辑 · 可删除':'可编辑 · 不可删除') + (u.canAdd?' · 可添加':' · 不可添加')
+            : (u.canAdd?'可添加歌曲':'不可添加歌曲')}</div>
+          <a href="#" style="font-size:10px; color:var(--cyan); margin-top:2px; display:inline-block" onclick="openResetPwd(${u.id})">🔑 重置密码</a>
+        </div>
+        ${u.role==='admin' ? '' : `
+          <div style="display:flex; align-items:center; gap:8px; flex-shrink:0">
+            ${u.role==='user' ? `<button class="btn btn-ghost btn-sm" style="padding:6px 8px; font-size:11px" onclick="grantMaint(${u.id})">升维护员</button>` : ''}
+            <div style="display:flex; flex-direction:column; align-items:center; gap:2px">
+              <span style="font-size:9px; color:var(--text-dim)">添加</span>
+              <div class="switch ${u.canAdd?'on':''}" onclick="toggleAdd(${u.id}, this)"></div>
+            </div>
+            ${u.role==='maint' ? `
+            <div style="display:flex; flex-direction:column; align-items:center; gap:2px">
+              <span style="font-size:9px; color:var(--text-dim)">删除</span>
+              <div class="switch ${u.canDelete?'on':''}" onclick="toggleDelete(${u.id}, this)"></div>
+            </div>` : ''}
+          </div>`}
+      </div>`).join('');
+  }
+  function doImport(){
+    // 模拟导入 60 首，15 首重复：10 首可复用，5 首进审核
+    const total = 60, dup = 15, reuse = 10, pending = 5, fresh = total - dup;
+    document.getElementById('import-result').style.display = 'block';
+    document.getElementById('ir-new').textContent = fresh;
+    document.getElementById('ir-reuse').textContent = reuse;
+    document.getElementById('ir-pending').textContent = pending;
+    toast(`导入 ${total} 首：${fresh} 新增，${reuse} 可复用，${pending} 需审核`);
+  }
+
+  let resetTargetUser = null;
+  function openResetPwd(id){
+    const u = USERS.find(x=>x.id===id);
+    resetTargetUser = u;
+    document.getElementById('reset-user-name').textContent = `为「${u.name}」设置新密码`;
+    document.getElementById('reset-new-pwd').value = '';
+    document.getElementById('reset-confirm-pwd').value = '';
+    openSheet('sheet-reset-pwd');
+  }
+  function confirmResetPwd(){
+    const p1 = document.getElementById('reset-new-pwd').value;
+    const p2 = document.getElementById('reset-confirm-pwd').value;
+    if(!p1 || p1.length < 6){ toast('密码至少 6 位'); return; }
+    if(p1 !== p2){ toast('两次密码不一致'); return; }
+    toast('已重置「'+resetTargetUser.name+'」的密码');
+    closeSheet('sheet-reset-pwd');
+  }
+  function toggleAdd(id, el){
+    const u = USERS.find(x=>x.id===id);
+    u.canAdd = !u.canAdd;
+    el.classList.toggle('on', u.canAdd);
+    renderUsers();
+    toast('已' + (u.canAdd?'允许':'禁止') + '「'+u.name+'」添加歌曲');
+  }
+  function grantMaint(id){
+    const u = USERS.find(x=>x.id===id);
+    u.role = 'maint';
+    renderUsers();
+    toast('已授予「'+u.name+'」曲库管家权限');
+  }
+  function toggleDelete(id, el){
+    const u = USERS.find(x=>x.id===id);
+    u.canDelete = !u.canDelete;
+    el.classList.toggle('on', u.canDelete);
+    toast('已' + (u.canDelete?'允许':'禁止') + '「'+u.name+'」删除歌曲');
+    renderUsers();
+  }
+
+  function renderLibrary(){
+    let view = libView==='mine' ? SONGS.filter(s=>s.mine) : SONGS;
+    view = applySceneFilter(view);
+    if(singerFilter) view = view.filter(s=>s.a===singerFilter);
+    const kw = (document.getElementById('lib-search').value||'').trim();
+    if(kw) view = view.filter(s=>s.t.includes(kw) || s.a.includes(kw));
+    document.getElementById('song-list').innerHTML = view.map(s=>`
+      <div class="song-item" data-id="${s.id}">
+        <div class="cover" style="font-size:16px">${s.hasLy?'🎤':'🎵'}</div>
+        <div class="info">
+          <div class="name">
+            ${s.t}
+            ${libView==='mine' && s.inMy ? `<span class="stars">${'★'.repeat(s.stars)}${'☆'.repeat(5-s.stars)}</span>` : ''}
+          </div>
+          <div class="artist">
+            ${s.a}
+            ${libView==='mine' && s.inMy ? `<span class="play-count">🎤 唱过 ${s.plays} 次</span>` : ''}
+            <span class="diff ${DIFF_CLASS[personalDiff(s)]}" style="margin-left:6px">${DIFF_LABEL[personalDiff(s)]}${s.overrideDiff?'·手动':''}</span>
+            ${libView==='all' ? `<span class="tag lang" style="margin-left:6px">${s.lang}</span>` : ''}
+          </div>
+        </div>
+        <div class="status-badges">
+          ${libView==='mine' && s.inMy ? `
+            ${s.hasLy ? `<span class="s-badge ly">歌词</span>` : `<span class="s-badge noly">无歌词</span>`}
+            ${s.recent ? `<span class="s-badge recent">7天前已唱</span>` : ''}
+            ${s.note ? `<span class="s-badge note">📌 备注</span>` : ''}
+          ` : ''}
+        </div>
+        <span class="sel-mark">✓</span>
+        ${renderSongAction(s)}
+      </div>`).join('');
+    updateCounts();
+  }
+
+  function goToSinger(){
+    const name = document.getElementById('pick-who').textContent;
+    singerFilter = name;
+    // 切到曲库 + 我的曲库视图
+    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    document.querySelector('.tab[data-tab=library]').classList.add('active');
+    document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+    document.getElementById('tab-library').classList.add('active');
+    setLibView('mine');
+    const search = document.getElementById('lib-search');
+    if(search){ search.value = name; search.focus(); }
+    toast('已筛选：「'+name+'」的歌，点×清除');
+  }
+  function onLibSearch(){
+    const v = (document.getElementById('lib-search').value||'').trim();
+    if(singerFilter && v!==singerFilter) singerFilter = '';
+    renderLibrary();
+  }
+  function applySceneFilter(list){
+    return list.filter(s=>{
+      switch(currentScene){
+        case 'strong': return (s.stars||0) >= 4;
+        case 'challenge': return personalDiff(s) === 'hard';
+        case 'recent': return s.recent;
+        case 'note': return !!s.note;
+        case 'new': return s.isNew;
+        case 'high': return (s.stars||0) >= 4;
+        case 'hard': return personalDiff(s) === 'hard';
+        default: return true;
+      }
+    });
+  }
+
+  function renderSongAction(s){
+    if(libView==='mine' && s.inMy){
+      return `<button class="btn-quick-add" onclick="event.stopPropagation(); openAddToPlaylist(${s.id})">＋</button>`;
+    }
+    if(libView==='all'){
+      if(!s.inMy){
+        return `<button class="btn-reuse" onclick="event.stopPropagation(); collectSong(${s.id})">＋ 收录</button>`;
+      }
+      // 已收录：曲库管家/管理员可编辑删除
+      if(currentRole==='admin' || currentRole==='maint'){
+        return `<button class="btn-maintain" onclick="event.stopPropagation(); openMaintain(${s.id})">⋯</button>`;
+      }
+      return '';
+    }
+    return '';
+  }
+  function openMaintain(id){
+    openSong(id);
+    toast('曲库管家：可编辑/删除全局歌曲');
+  }
+
+  let currentRole = 'admin';
+  let currentUserName = '林沐';
+  let maintCanDelete = true;
+  function switchRole(role){
+    currentRole = role;
+    const maintUser = USERS.find(u=>u.role==='maint');
+    maintCanDelete = maintUser ? maintUser.canDelete : true;
+    const selfUser = USERS.find(u=>u.role===role);
+    currentCanAdd = role==='admin' ? true : (selfUser ? selfUser.canAdd : true);
+    currentUserName = selfUser ? selfUser.name : '林沐';
+    document.getElementById('role-admin').classList.toggle('on', role==='admin');
+    document.getElementById('role-maint').classList.toggle('on', role==='maint');
+    document.getElementById('role-user').classList.toggle('on', role==='user');
+    document.getElementById('admin-section').style.display = role==='admin' ? 'block' : 'none';
+    document.getElementById('review-section').style.display = (role==='admin' || role==='maint') ? 'block' : 'none';
+    document.getElementById('user-backup').style.display = (role==='admin' || role==='maint') ? 'none' : 'block';
+    document.getElementById('review-hint').textContent = role==='maint' ? '待审核 · 可合并/拒绝' : '待审核重复歌曲';
+    const badge = document.getElementById('me-role-badge');
+    if(role==='admin'){
+      badge.textContent = '管理员 ▾';
+      badge.className = 'role-badge role-admin';
+      document.getElementById('me-role-hint').textContent = '拥有全部管理权限';
+    } else if(role==='maint'){
+      badge.textContent = '曲库管家 ▾';
+      badge.className = 'role-badge role-maint';
+      document.getElementById('me-role-hint').textContent = '可编辑/删除全局曲库歌曲';
+    } else {
+      badge.textContent = '普通用户 ▾';
+      badge.className = 'role-badge role-user';
+      document.getElementById('me-role-hint').textContent = '管理我的歌曲与歌单';
+    }
+    document.getElementById('backup-hint').textContent = role==='admin' ? '导出全部数据' : '导出我的歌曲数据';
+    if(document.getElementById('backup-hint2')) document.getElementById('backup-hint2').textContent = '导出我的歌曲数据';
+    renderLibrary();
+    toast('已切换为：' + (role==='admin'?'管理员':role==='maint'?'曲库管家':'普通用户'));
+  }
+  function toggleRoleMenu(){
+    const menu = document.getElementById('role-menu');
+    menu.style.display = menu.style.display==='none' ? 'block' : 'none';
+  }
+  function toggleSettings(){
+    const body = document.getElementById('settings-body');
+    body.style.display = body.style.display==='none' ? 'block' : 'none';
+    document.getElementById('settings-arrow').textContent = body.style.display==='block' ? '▴' : '▾';
+  }
+  function updateMeStats(){
+    const played = SONGS.reduce((s,x)=>s+(x.plays||0), 0);
+    document.getElementById('me-stat-total').textContent = played;
+    const today = HISTORY.filter(h=>h.date==='今天').length;
+    document.getElementById('me-stat-today').textContent = today;
+    document.getElementById('mq-songs').textContent = SONGS.filter(s=>s.mine).length;
+    document.getElementById('mq-ktv').textContent = ktvList.length;
+    document.getElementById('mq-history').textContent = HISTORY.length;
+  }
+  const BACKUPS = [
+    {time:'今天 08:00', size:'2.4 MB', type:'自动'},
+    {time:'昨天 08:00', size:'2.3 MB', type:'自动'},
+    {time:'周一 08:00', size:'2.3 MB', type:'自动'},
+  ];
+  function renderBackupList(){
+    document.getElementById('backup-list').innerHTML = BACKUPS.map(b=>`
+      <div class="user-row">
+        <div class="u-info">
+          <div class="u-name">${b.time} <span style="font-size:10px; color:var(--cyan); border:1px solid rgba(34,211,238,.3); padding:1px 6px; border-radius:5px">${b.type}</span></div>
+          <div class="u-sub">${b.size} · /data/backups/</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" style="padding:6px 10px; font-size:11px" onclick="toast('模拟：从该备份恢复')">恢复</button>
+      </div>`).join('');
+  }
+  function manualBackup(){
+    toast('正在备份整个 /data 目录…');
+    setTimeout(()=>{
+      BACKUPS.unshift({time:'刚刚', size:'2.4 MB', type:'手动'});
+      if(BACKUPS.length>7) BACKUPS.pop();
+      renderBackupList();
+      toast('✅ 备份完成，已保存到 /data/backups/');
+    }, 1500);
+  }
+  let mtwConfig = { enabled: false, url: '', user: '', pass: '', resource: 'netease' };
+  function testMtw(){
+    const url = document.getElementById('mtw-url').value.trim();
+    const user = document.getElementById('mtw-user').value.trim();
+    const pass = document.getElementById('mtw-pass').value;
+    if(!url || !user || !pass){ toast('请填写 MTW 地址、用户名、密码'); return; }
+    toast('正在测试连接…');
+    setTimeout(()=>{ toast('✅ MTW 连接成功，刮削源可用'); }, 1200);
+  }
+  function saveMtw(){
+    mtwConfig.enabled = document.getElementById('mtw-type').value === 'mtw';
+    mtwConfig.url = document.getElementById('mtw-url').value.trim();
+    mtwConfig.user = document.getElementById('mtw-user').value.trim();
+    mtwConfig.pass = document.getElementById('mtw-pass').value;
+    mtwConfig.resource = document.getElementById('mtw-resource').value;
+    document.getElementById('mtw-status-hint').textContent = mtwConfig.enabled ? '已配置 MTW' : '未配置';
+    closeSheet('sheet-mtw-config');
+    toast(mtwConfig.enabled ? '刮削源已保存：Music Tag Web' : '已关闭刮削源');
+  }
+
+  // 刮削候选
+  let scrapeCandidates = [];
+  let scrapeTargetSong = null;
+  function scrapeSongDetail(){
+    if(!mtwConfig.enabled){ toast('尚未配置刮削源，请先在设置中配置'); return; }
+    if(!currentDetail) return;
+    toast('正在刮削「'+currentDetail.t+'」…');
+    setTimeout(()=>{
+      // 模拟候选：真实场景调 /apimt/fetch_id3_by_title/
+      scrapeCandidates = [
+        { title: currentDetail.t, artist: currentDetail.a, album: '同名专辑', quality: 'FLAC', cover: true, lyric: true },
+        { title: currentDetail.t + '(Live)', artist: currentDetail.a, album: '演唱会现场', quality: 'MP3', cover: true, lyric: false },
+      ];
+      scrapeTargetSong = currentDetail;
+      document.getElementById('sc-can-title').textContent = `「${currentDetail.t} · ${currentDetail.a}」`;
+      document.getElementById('sc-can-list').innerHTML = scrapeCandidates.map((c,i)=>`
+        <div class="user-row" style="cursor:pointer" onclick="selectScrapeCan(${i}, this)">
+          <div class="u-info">
+            <div class="u-name">${c.title} ${c.quality==='FLAC'?'<span style="font-size:10px;color:var(--cyan)">FLAC</span>':''}</div>
+            <div class="u-sub">${c.artist} · ${c.album}${c.lyric?' · 有歌词':''}</div>
+          </div>
+          <span class="role-badge" id="sc-can-${i}">选择</span>
+        </div>`).join('');
+      openSheet('sheet-scrape-candidates');
+    }, 1200);
+  }
+  function selectScrapeCan(i, el){
+    document.querySelectorAll('#sc-can-list .role-badge').forEach(b=>{ b.textContent='选择'; b.className='role-badge role-user'; });
+    document.getElementById('sc-can-'+i).textContent='✓ 已选';
+    document.getElementById('sc-can-'+i).className='role-badge role-maint';
+  }
+  function useScrapeCandidate(){
+    if(scrapeTargetSong){
+      scrapeTargetSong.album = scrapeCandidates[0].album;
+      scrapeTargetSong.hasLy = true;
+      toast('已补全「'+scrapeTargetSong.t+'」的专辑、封面、歌词');
+      const s = scrapeTargetSong;
+      document.getElementById('sd-lyric-status').textContent = '🎤 有歌词 · 原文+音译';
+    }
+    closeSheet('sheet-scrape-candidates');
+  }
+
+  let batchActive = false;
+
+  function bindSongGestures(){
+    const list = document.getElementById('song-list');
+    const startXY = {x:0, y:0};
+    let timer = null, longPress = false, moved = false;
+
+    function onStart(e){
+      const t = e.touches ? e.touches[0] : e;
+      startXY.x = t.clientX; startXY.y = t.clientY;
+      moved = false; longPress = false;
+      clearTimeout(timer);
+      timer = setTimeout(()=>{
+        if(!moved){ longPress = true; enterBatch(e.target.closest('.song-item')); }
+      }, 420);
+    }
+    function onMove(e){
+      const t = e.touches ? e.touches[0] : e;
+      if(Math.abs(t.clientX - startXY.x) > 10 || Math.abs(t.clientY - startXY.y) > 10) moved = true;
+      if(moved) clearTimeout(timer);
+    }
+    function onEnd(e){
+      clearTimeout(timer);
+      if(longPress){
+        longPress = false;
+        if(e.cancelable) e.preventDefault();
+        return;
+      }
+      if(!moved && !e.target.closest('.btn-reuse')){
+        const item = e.target.closest('.song-item');
+        if(batchActive){
+          toggleSel(item);
+        } else {
+          openSong(Number(item.dataset.id));
+        }
+      }
+    }
+
+    list.addEventListener('touchstart', onStart, {passive:true});
+    list.addEventListener('touchmove', onMove, {passive:true});
+    list.addEventListener('touchend', onEnd, {passive:true});
+    list.addEventListener('mousedown', onStart);
+    list.addEventListener('mousemove', onMove);
+    list.addEventListener('mouseup', onEnd);
+    list.addEventListener('click', e=>{ if(longPress){ e.preventDefault(); e.stopPropagation(); } });
+  }
+
+  function enterBatch(el){
+    if(libView==='all'){ toast('批量操作仅在我的曲库可用'); return; }
+    batchActive = true;
+    document.querySelectorAll('#song-list .song-item').forEach(i=>i.classList.add('batch-mode'));
+    document.getElementById('batch-bar').classList.add('show');
+    if(el) toggleSel(el, true);
+    updateBatchCount();
+    toast('已进入批量选择，点其他歌曲可多选');
+  }
+
+  function toggleSel(el, force){
+    const item = el.classList ? el : el.closest('.song-item');
+    if(force===true){ item.classList.add('selected'); } else { item.classList.toggle('selected'); }
+    updateBatchCount();
+  }
+  function updateBatchCount(){
+    const items = Array.from(document.querySelectorAll('#song-list .song-item'));
+    const selected = items.filter(i=>i.classList.contains('selected'));
+    selected.forEach((i,idx)=>{
+      i.querySelector('.sel-mark').textContent = idx+1;
+    });
+    const n = selected.length;
+    const b = document.getElementById('batch-bar');
+    if(n>0){ b.classList.add('show'); b.querySelector('.count').textContent = `已选 ${n} 首`; }
+    else { b.classList.remove('show'); batchActive = false; }
+  }
+  function batchToKtv(){
+    const selected = Array.from(document.querySelectorAll('#song-list .song-item.selected'));
+    if(!selected.length){ toast('请先选择歌曲'); return; }
+    let added = 0;
+    selected.forEach(item=>{
+      const s = SONGS.find(x=>x.id==item.dataset.id);
+      if(s && !ktvList.some(k=>k.id===s.id)){
+        ktvList.push(s);
+        added++;
+      }
+    });
+    ktvSongCount = ktvList.length;
+    document.getElementById('ktv-count').textContent = ktvSongCount;
+    clearSelect();
+    toast(`已将 ${added} 首歌加入「下一次 KTV」`);
+  }
+  function batchScrape(){
+    if(!mtwConfig.enabled){ toast('尚未配置刮削源，请先在设置中配置'); return; }
+    const selected = Array.from(document.querySelectorAll('#song-list .song-item.selected'));
+    if(!selected.length){ toast('请先选择歌曲'); return; }
+    clearSelect();
+    toast(`开始后台刮削 ${selected.length} 首歌，可继续其他操作…`);
+    // 模拟后台批处理（真实场景：任务队列分批事务提交 song_scrape）
+    setTimeout(()=>{
+      const n = selected.length;
+      const ok = Math.round(n * 0.75);
+      const multi = Math.round(n * 0.12);
+      const none = Math.round(n * 0.08);
+      const fail = n - ok - multi - none;
+      document.getElementById('sr-ok').textContent = ok;
+      document.getElementById('sr-multi').textContent = multi;
+      document.getElementById('sr-none').textContent = none;
+      document.getElementById('sr-fail').textContent = fail;
+      openSheet('sheet-scrape-result');
+    }, 2500);
+  }
+  function retryScrapeFail(){
+    closeSheet('sheet-scrape-result');
+    toast('正在重试失败项…');
+    setTimeout(()=>{ toast('重试完成：全部补全成功'); }, 1500);
+  }
+  let beDiff = '';
+  function bePickDiff(d){
+    beDiff = beDiff === d ? '' : d;
+    document.querySelectorAll('.be-opt').forEach(b=>{
+      b.classList.toggle('on', b.dataset.beDiff === beDiff);
+    });
+  }
+  function renderBatchEdit(){
+    const n = document.querySelectorAll('#song-list .song-item.selected').length;
+    document.getElementById('be-count').textContent = n;
+    beDiff = '';
+    document.querySelectorAll('.be-opt').forEach(b=>b.classList.remove('on'));
+    document.getElementById('be-genre').value = '';
+    document.getElementById('be-stars').value = '0';
+  }
+  function applyBatchEdit(){
+    const selected = Array.from(document.querySelectorAll('#song-list .song-item.selected'));
+    if(!selected.length){ toast('请先选择歌曲'); return; }
+    let changed = 0;
+    selected.forEach(item=>{
+      const s = SONGS.find(x=>x.id==item.dataset.id);
+      if(!s) return;
+      if(beDiff){ s.difficulty = beDiff; changed++; }
+      const genre = document.getElementById('be-genre').value;
+      if(genre){ s.genre = genre; changed++; }
+      const stars = Number(document.getElementById('be-stars').value);
+      if(stars>0){ s.stars = stars; changed++; }
+    });
+    closeSheet('sheet-batch-edit');
+    clearSelect();
+    renderLibrary();
+    toast(`已批量更新 ${selected.length} 首歌`);
+  }
+  function clearSelect(){
+    document.querySelectorAll('.song-item.selected').forEach(e=>e.classList.remove('selected'));
+    document.querySelectorAll('.song-item.batch-mode').forEach(e=>e.classList.remove('batch-mode'));
+    batchActive = false;
+    document.getElementById('batch-bar').classList.remove('show');
+  }
+
+  function updateCounts(){
+    document.getElementById('cnt-mine').textContent = `${SONGS.filter(s=>s.mine).length}`;
+    document.getElementById('cnt-all').textContent = `${SONGS.length}`;
+  }
+
+  let mineSub = 'songs';
+  function setLibView(v){
+    clearSelect();
+    libView = v;
+    document.getElementById('subtab-mine').classList.toggle('on', v==='mine');
+    document.getElementById('subtab-all').classList.toggle('on', v==='all');
+    // 下拉（歌单/歌曲切换）仅我的曲库显示；全部曲库用搜索+筛选+导入
+    document.getElementById('lib-top').style.display = 'flex';
+    document.getElementById('lib-select-menu').style.display = 'none';
+    document.getElementById('btn-import').style.display = v==='all' ? 'inline-flex' : 'none';
+    if(v==='mine'){
+      mineSub = 'songs';
+      updateMineSelect();
+      document.getElementById('lib-select').style.display = 'flex';
+      document.getElementById('view-playlists').style.display = 'none';
+      document.getElementById('view-songs').style.display = 'block';
+      document.getElementById('bar-sub').textContent = '收录的都是会唱的';
+      const empty = document.getElementById('lib-empty');
+      empty.style.display = SONGS.filter(s=>s.mine).length ? 'none' : 'block';
+    } else {
+      document.getElementById('lib-select').style.display = 'none';
+      document.getElementById('view-playlists').style.display = 'none';
+      document.getElementById('view-songs').style.display = 'block';
+      document.getElementById('bar-sub').textContent = '全站共享的歌曲库';
+      document.getElementById('lib-empty').style.display = 'none';
+    }
+    renderSceneChips();
+    renderLibrary();
+  }
+  function updateMineSelect(){
+    document.getElementById('lib-select-label').textContent = mineSub==='songs' ? '🎵 歌曲' : '📋 歌单';
+    document.querySelectorAll('.lsm-item').forEach(i=>{
+      i.classList.toggle('on', i.dataset.sub===mineSub);
+    });
+  }
+  function toggleMineSelect(){
+    const menu = document.getElementById('lib-select-menu');
+    menu.style.display = menu.style.display==='none' ? 'block' : 'none';
+  }
+  function setMineSub(sub){
+    mineSub = sub;
+    updateMineSelect();
+    document.getElementById('lib-select-menu').style.display = 'none';
+    document.getElementById('view-playlists').style.display = sub==='plists' ? 'block' : 'none';
+    document.getElementById('view-songs').style.display = sub==='songs' ? 'block' : 'none';
+    document.getElementById('bar-sub').textContent = sub==='plists' ? '我的歌单' : '收录的都是会唱的';
+  }
+
+  function openSong(id){
+    currentDetail = SONGS.find(s=>s.id===id);
+    const s = currentDetail;
+    const canMaintain = currentRole==='admin' || currentRole==='maint';
+    const isOwner = s.owner === currentUserName;
+    // 双轨制删除：创建者可删自己添加的歌（无开关限制）；删别人的受"允许删除"开关控制
+    const canDelete = currentRole==='admin' || isOwner || (currentRole==='maint' && maintCanDelete);
+    document.getElementById('sd-edit-btn').style.display = canMaintain ? 'inline-flex' : 'none';
+    const delBtn = document.getElementById('sd-del-btn');
+    if(libView==='mine'){
+      // 我的曲库：移出个人收藏（不删全局）
+      delBtn.style.display = 'inline-flex';
+      delBtn.textContent = '📤 移出我的曲库';
+      delBtn.style.color = 'var(--text-dim)';
+    } else {
+      // 全部曲库：删除全局歌曲，仅维护员/管理员
+      delBtn.style.display = canDelete ? 'inline-flex' : 'none';
+      delBtn.textContent = '🗑 删除歌曲';
+      delBtn.style.color = 'var(--pink)';
+    }
+    document.getElementById('sd-title').textContent = s.t;
+    document.getElementById('sd-artist').textContent = s.a;
+    document.getElementById('sd-badges').innerHTML =
+      (s.hasLy?`<span class="s-badge ly">🎤 有歌词</span>`:`<span class="s-badge noly">无歌词</span>`) +
+      (s.recent?`<span class="s-badge recent">7天内已唱</span>`:'');
+    document.getElementById('sd-owner').innerHTML =
+      `<span style="width:8px;height:8px;border-radius:50%;background:${s.ownerRole==='管理员'?'var(--pink)':s.ownerRole==='曲库管家'?'var(--cyan)':'var(--text-dim)'};display:inline-block"></span>
+       添加者 ${s.owner} · ${s.ownerRole}`;
+    document.getElementById('sd-stars').innerHTML = [1,2,3,4,5].map(i=>`<span onclick="rateSongInDetail(${s.id}, ${i})">${i<=s.stars?'★':'☆'}</span>`).join('');
+    const pd = personalDiff(s);
+    document.getElementById('sd-meta').innerHTML = `<span class="tag lang">${s.lang}</span><span class="tag genre">${s.genre}</span><span class="diff ${DIFF_CLASS[pd]}">${DIFF_LABEL[pd]}${s.overrideDiff?' · 手动':''}</span>`;
+    document.getElementById('sd-diff-hint').textContent = s.overrideDiff ? '已手动设置' : `根据演唱记录推断（全局：${DIFF_LABEL[s.difficulty]}）`;
+    document.querySelectorAll('#sd-diff .diff-opt').forEach(btn=>{
+      btn.classList.toggle('on', btn.dataset.d === (s.overrideDiff || ''));
+    });
+    const noteEl = document.getElementById('sd-note');
+    if(s.note){
+      noteEl.textContent = s.note;
+      noteEl.classList.remove('empty');
+    } else {
+      noteEl.textContent = '暂无备注';
+      noteEl.classList.add('empty');
+    }
+    document.getElementById('sd-plays').innerHTML = s.inMy ? `已唱 <b>${s.plays}</b> 次 · 最近 ${s.recent?'7天内唱过':'较久没唱'}` : '';
+    document.getElementById('sd-lyric-status').textContent = s.hasLy ? '🎤 有歌词 · 原文+音译' : '🎵 暂无歌词';
+    document.getElementById('sd-hist').innerHTML = s.hist.map((h,i)=>`
+      <div class="hist-row">
+        <span class="time">${h[0]}</span>
+        <span class="who">${h[1]}</span>
+        <span class="what">${h[2]}</span>
+        ${i>0?`<button class="rollback" onclick="rollback(${i})">回退</button>`:''}
+      </div>`).join('');
+    document.getElementById('sd-rollback-all').style.display = (canMaintain && s.hist.length>1) ? 'flex' : 'none';
+    openSheet('sheet-song-detail');
+  }
+  function rateSongInDetail(id, n){
+    const s = SONGS.find(x=>x.id===id);
+    if(!s) return;
+    s.stars = n;
+    document.getElementById('sd-stars').innerHTML = [1,2,3,4,5].map(i=>`<span onclick="rateSongInDetail(${id}, ${i})">${i<=s.stars?'★':'☆'}</span>`).join('');
+    toast('已更新「'+s.t+'」的整体评分：'+n+' 星');
+  }
+  function setSongDiff(d){
+    if(!currentDetail) return;
+    currentDetail.overrideDiff = d;
+    const pd = personalDiff(currentDetail);
+    document.querySelectorAll('#sd-diff .diff-opt').forEach(btn=>{
+      btn.classList.toggle('on', btn.dataset.d === d);
+    });
+    document.getElementById('sd-diff-hint').textContent = '已手动设置';
+    document.getElementById('sd-meta').innerHTML = `<span class="tag lang">${currentDetail.lang}</span><span class="tag genre">${currentDetail.genre}</span><span class="diff ${DIFF_CLASS[pd]}">${DIFF_LABEL[pd]} · 手动</span>`;
+    toast('已手动设置难度：'+DIFF_LABEL[d]);
+  }
+  function clearDiffOverride(){
+    if(!currentDetail) return;
+    currentDetail.overrideDiff = '';
+    const pd = personalDiff(currentDetail);
+    document.querySelectorAll('#sd-diff .diff-opt').forEach(btn=>{
+      btn.classList.toggle('on', btn.dataset.d === '');
+    });
+    document.getElementById('sd-diff-hint').textContent = `根据演唱记录推断（全局：${DIFF_LABEL[currentDetail.difficulty]}）`;
+    document.getElementById('sd-meta').innerHTML = `<span class="tag lang">${currentDetail.lang}</span><span class="tag genre">${currentDetail.genre}</span><span class="diff ${DIFF_CLASS[pd]}">${DIFF_LABEL[pd]}</span>`;
+    toast('已恢复自动推断难度');
+  }
+
+  function rollback(i){
+    const s = currentDetail;
+    toast(`模拟：已回退到「${s.hist[i][2]}」之前的版本`);
+    closeSheet('sheet-song-detail');
+  }
+  function rollbackAll(){
+    toast('模拟：已回退到初始版本');
+    closeSheet('sheet-song-detail');
+  }
+
+  function handleDel(){
+    if(!currentDetail) return;
+    const s = currentDetail;
+    if(libView==='mine'){
+      // 移出我的曲库
+      s.mine = false; s.inMy = false;
+      closeSheet('sheet-song-detail');
+      toast('已将「'+s.t+'」移出我的曲库（仍保留在全部曲库）');
+      renderLibrary();
+    } else {
+      // 删除全局歌曲，需二次确认
+      delConfirmMode = 'song';
+      document.getElementById('del-confirm-title').textContent = `删除「${s.t}」？`;
+      document.getElementById('del-confirm-desc').textContent = `将从全部曲库删除这首歌，影响所有用户。此操作不可撤销。`;
+      openSheet('sheet-del-confirm');
+    }
+  }
+  let delConfirmMode = 'song';
+  function confirmDelAction(){
+    if(delConfirmMode === 'playlist'){
+      confirmDelPlaylist();
+    } else {
+      confirmDel();
+    }
+  }
+  function confirmDel(){
+    const s = currentDetail;
+    const idx = SONGS.indexOf(s);
+    if(idx>=0) SONGS.splice(idx,1);
+    closeSheet('sheet-del-confirm');
+    closeSheet('sheet-song-detail');
+    toast('已删除「'+s.t+'」');
+    renderLibrary();
+  }
+  function askDelPlaylist(){
+    delConfirmMode = 'playlist';
+    document.getElementById('del-confirm-title').textContent = `删除歌单「生日局」？`;
+    document.getElementById('del-confirm-desc').textContent = `歌单将被永久删除，所有协作者的协作关系将解除。此操作不可撤销。`;
+    openSheet('sheet-del-confirm');
+  }
+  function confirmDelPlaylist(){
+    // 当前歌单详情固定演示「生日局」协作歌单
+    closeSheet('sheet-del-confirm');
+    closeSheet('sheet-pl-detail');
+    toast('已删除歌单「生日局」，协作关系已解除');
+  }
+
+  function collectSong(id){
+    const s = SONGS.find(s=>s.id===id);
+    s.mine = true; s.inMy = true;
+    toast('已收录「'+s.t+'」到我的曲库');
+    renderLibrary();
+  }
+
+  let ktvSongCount = 0;
+  const ktvList = [];
+  function openAddToPlaylist(id){
+    currentKtvSong = SONGS.find(s=>s.id===id);
+    document.getElementById('ap-song-name').textContent = `${currentKtvSong.t} · ${currentKtvSong.a}`;
+    openSheet('sheet-add-playlist');
+  }
+  function addToKtv(){
+    if(!currentKtvSong) return;
+    if(!ktvList.some(s=>s.id===currentKtvSong.id)){
+      ktvList.push(currentKtvSong);
+    }
+    ktvSongCount = ktvList.length;
+    document.getElementById('ktv-count').textContent = ktvSongCount;
+    toast(`已加入「下一次 KTV」：${currentKtvSong.t}`);
+    closeSheet('sheet-add-playlist');
+  }
+  let currentKtvSong = null;
+
+  bindSongGestures();
+  renderSceneChips();
+  renderLibrary();
+  updateMeStats();
+
+  const PICK_POOL = [
+    {t:'演员',a:'薛之谦',hasLy:true,translit:'gāi pèi hé nǐ yǎn chū de wǒ yǎn shì ér bù jiàn',
+      ls:['简单点 说话的方式简单点','递进的情绪请省略','你又不是个演员 别设计那些情节','该配合你演出的我演视而不见','在逼一个最爱你的人即兴表演','什么时候我们开始收起了底线','顺应时代的改变看那些拙劣的表演']},
+    {t:'富士山下',a:'陈奕迅',hasLy:true,translit:'shéi dōu zhǐ dé nà shuāng shǒu kào yōng bào yì nán rèn nǐ yōng yǒu',
+      ls:['拦路雨偏似雪花 饮泣的你冻吗','这风褛我给你磨到有襟花','谁都只得那双手 靠拥抱亦难任你拥有','要拥有必先懂失去怎接受']},
+    {t:'晴天',a:'周杰伦',hasLy:true,translit:'gù shì de xiǎo huáng huā cóng chū shēng nà nián jiù piāo zhe',
+      ls:['故事的小黄花 从出生那年就飘着','童年的荡秋千 随记忆一直晃到现在','Re So So Si Do Si La So La Si Si Si Si La Si La So']},
+    {t:'海阔天空',a:'Beyond',hasLy:false,ls:['这首歌暂未添加歌词','可点击卡片右下角编辑添加']},
+  ];
+  let pi = 0, hasFlipped = false;
+  function doPick(){
+    const card = document.getElementById('pick-card');
+    const s = pickNextSong();
+    document.getElementById('pick-title').textContent = s.t;
+    document.getElementById('pick-who').textContent = s.a;
+    renderPickLy(s);
+    const src = document.querySelector('.front-badge');
+    if(s.noMatch){
+      src.textContent = '🎲 无匹配';
+      document.getElementById('pick-actions').style.display='none';
+      document.getElementById('pick-tip').textContent = '没有符合筛选的歌 · 点「🎲 筛选」放宽条件';
+      if(!hasFlipped){
+        hasFlipped = true;
+        requestAnimationFrame(()=>card.classList.add('flip'));
+      } else {
+        card.classList.remove('flip');
+        void card.offsetWidth;
+        requestAnimationFrame(()=>card.classList.add('flip'));
+      }
+      return;
+    }
+    src.textContent = s.fromKtv ? '🎤 来自下一次 KTV' : (s.fromGlobal ? '✨ 来自全部曲库' : '🎵 为你 Pick');
+
+    if(!hasFlipped){
+      hasFlipped = true;
+      document.getElementById('pick-actions').style.display='block';
+      document.getElementById('pick-tip').textContent = '唱完点下方按钮评分 · 或再点 🎲 换一首';
+      requestAnimationFrame(()=>card.classList.add('flip'));
+      const g = document.getElementById('pick-glow');
+      g.classList.remove('hit'); void g.offsetWidth; g.classList.add('hit');
+    } else {
+      card.classList.remove('flip');
+      void card.offsetWidth;
+      requestAnimationFrame(()=>card.classList.add('flip'));
+    }
+    if(document.getElementById('karaoke').classList.contains('show')) closeKaraoke();
+  }
+
+  const DIFF_WEIGHT = {easy:1, medium:1.5, hard:2};
+  // 个人感知难度：手动覆盖 > 全局难度 - 熟练度加成
+  function personalDiff(s){
+    if(s.overrideDiff) return s.overrideDiff;
+    const base = DIFF_LEVEL[s.difficulty] || 1;
+    let bonus = 0;
+    const plays = s.plays || 0;
+    const stars = s.stars || 0;
+    if(plays >= 5 && stars >= 4) bonus = 2;
+    else if(plays >= 3 && stars >= 4) bonus = 1;
+    const level = Math.max(0, Math.min(2, base - bonus));
+    return DIFF_BY_LEVEL[level];
+  }
+  function pickNextSong(){
+    if(ktvList.length > 0){
+      const pick = ktvList[Math.floor(Math.random()*ktvList.length)];
+      return {t:pick.t, a:pick.a, hasLy:pick.hasLy, fromKtv:true, ls: pick.hasLy ? ['为你攒的下一首','🎤 来自「下一次 KTV」歌单','唱完记得标记，它会从歌单移除'] : ['这首歌暂未添加歌词','可点击卡片右下角编辑添加']};
+    }
+    const minePool = SONGS.filter(s=>s.mine && s.inMy && passFilter(s));
+    if(minePool.length > 0){
+      const pick = weightedPick(minePool);
+      return {t:pick.t, a:pick.a, hasLy:pick.hasLy, fromKtv:false, fromGlobal:false, difficulty:pick.difficulty, ls: pick.hasLy ? ['从我的曲库为你选一首','🎵 拿手歌，放心唱'] : ['这首歌暂未添加歌词','可点击卡片右下角编辑添加']};
+    }
+    // 全部曲库兜底（不限收录状态，随机抽）
+    const globalPool = SONGS.length ? SONGS.filter(passFilter) : PICK_POOL;
+    if(globalPool.length > 0){
+      const pick = weightedPick(globalPool);
+      return {t:pick.t, a:pick.a, hasLy:pick.hasLy, fromKtv:false, fromGlobal:true, ls: ['从全部曲库为你选一首','✨ 唱完记得评分，好歌会进你的曲库']};
+    }
+    // 筛选后无匹配 → 返回引导，不硬抽
+    return {t:'无匹配结果', a:'', hasLy:false, fromKtv:false, fromGlobal:false, noMatch:true, ls: ['没有符合筛选条件的歌曲','🎲 试试放宽筛选条件再抽']};
+  }
+  function passFilter(s){
+    if(selectedFilter.lang.length && !selectedFilter.lang.includes(s.lang)) return false;
+    if(selectedFilter.genre.length && !selectedFilter.genre.includes(s.genre)) return false;
+    if(selectedFilter.diff.length && !selectedFilter.diff.includes(DIFF_LABEL[personalDiff(s)]||'中等')) return false;
+    if(selectedFilter.rating.length){
+      const r = s.stars||0;
+      if(selectedFilter.rating.includes('★5') && r<5) return false;
+      if(selectedFilter.rating.includes('★4 以上') && r<4) return false;
+      if(selectedFilter.rating.includes('★3 以上') && r<3) return false;
+    }
+    return true;
+  }
+  function weightedPick(pool){
+    const weights = pool.map(s=>{
+      const diffW = DIFF_WEIGHT[personalDiff(s)]||1.5;
+      const starW = (s.stars||0) * 1.2;
+      return Math.max(0.5, diffW + starW);
+    });
+    const total = weights.reduce((a,b)=>a+b, 0);
+    let r = Math.random() * total;
+    for(let i=0; i<pool.length; i++){
+      r -= weights[i];
+      if(r <= 0) return pool[i];
+    }
+    return pool[pool.length-1];
+  }
+
+  function renderPickLy(s){
+    const hint = document.getElementById('ly-hint');
+    const scroll = document.getElementById('ly-scroll');
+    if(s.noMatch){
+      hint.textContent = '🧐 试试放宽筛选';
+      scroll.innerHTML = s.ls.map(l=>`<div>${l}</div>`).join('');
+    } else if(s.hasLy){
+      hint.textContent = '轻点歌词进入跟唱 🎤';
+      scroll.innerHTML = s.ls.map((l,i)=>`<div class="${i===3?'cur':''}">${l}</div>`).join('');
+    } else {
+      hint.textContent = '暂未添加歌词';
+      scroll.innerHTML = `<div>♪ 给这首歌加上歌词</div><div>唱外语歌还能带音译</div>`;
+    }
+    document.getElementById('k-title').textContent = s.t;
+    document.getElementById('k-who').textContent = s.a;
+    document.getElementById('k-lyrics').innerHTML = '';
+  }
+
+  function openKaraoke(){
+    const s = PICK_POOL[pi];
+    if(!s.hasLy){ toast('这首歌还没有歌词，先去添加吧'); return; }
+    kMode('orig');
+    document.getElementById('karaoke').classList.add('show');
+  }
+  function closeKaraoke(){ document.getElementById('karaoke').classList.remove('show'); }
+  function kMode(mode){
+    document.getElementById('k-lang-orig').classList.toggle('on', mode==='orig');
+    document.getElementById('k-lang-trans').classList.toggle('on', mode==='trans');
+    const s = PICK_POOL[pi];
+    const lines = mode==='trans' ? [s.translit] : s.ls;
+    const box = document.getElementById('k-lyrics');
+    box.innerHTML = lines.map((l,i)=>`<div class="k-line ${i===0?'cur':''}" onclick="kSeek(this, ${i})">${l}</div>`).join('');
+    box.scrollTop = 0;
+    kSeek(box.querySelector('.k-line.cur'), 0);
+  }
+  function kSeek(el, i){
+    const box = document.getElementById('k-lyrics');
+    box.querySelectorAll('.k-line').forEach(x=>x.classList.remove('cur'));
+    el.classList.add('cur');
+    const y = el.offsetTop - box.clientHeight/2 + el.clientHeight/2;
+    box.scrollTo({ top: Math.max(0,y), behavior:'smooth' });
+  }
+  function removeFromKtv(title){
+    const idx = ktvList.findIndex(s=>s.t===title);
+    if(idx>=0){
+      ktvList.splice(idx,1);
+      ktvSongCount = ktvList.length;
+      document.getElementById('ktv-count').textContent = ktvSongCount;
+      if(ktvList.length === 0){
+        setTimeout(()=>{ openSheet('sheet-ktv-done'); }, 600);
+      }
+      return true;
+    }
+    return false;
+  }
+  let rateStar = 0;
+  let rateCollect = true;
+  function openRate(){
+    const t = document.getElementById('pick-title').textContent;
+    document.getElementById('rate-song').textContent = `「${t}」 · 这次发挥如何？`;
+    rateStar = 0;
+    rateCollect = true;
+    document.getElementById('rate-stars').textContent = '☆☆☆☆☆';
+    document.getElementById('rate-note').value = '';
+    // 仅未收录的歌显示"收录到我的曲库"开关
+    const song = SONGS.find(s=>s.t===t);
+    const coll = document.getElementById('rate-collect');
+    if(song && !song.inMy){
+      coll.style.display = 'flex';
+      document.getElementById('rate-collect-switch').classList.add('on');
+    } else {
+      coll.style.display = 'none';
+    }
+    openSheet('sheet-rate');
+  }
+  function toggleRateCollect(){
+    rateCollect = !rateCollect;
+    document.getElementById('rate-collect-switch').classList.toggle('on', rateCollect);
+  }
+  function rateStars(n){
+    rateStar = n;
+    document.getElementById('rate-stars').textContent = '★'.repeat(n) + '☆'.repeat(5-n);
+  }
+  function submitRate(skip){
+    const t = document.getElementById('pick-title').textContent;
+    const who = document.getElementById('pick-who').textContent;
+    const song = SONGS.find(s=>s.t===t);
+    const MILESTONES = [5, 10, 20, 50];
+    if(song){
+      const beforeDiff = song.overrideDiff ? null : personalDiff(song);
+      const beforePlays = song.plays || 0;
+      if(!skip && rateStar>0){
+        song.stars = rateStar;
+        song.plays = beforePlays + 1;
+        song.note = document.getElementById('rate-note').value.trim() || song.note;
+      } else {
+        song.plays = beforePlays + 1;
+      }
+      // 练习里程碑认可（独立于难度降级）：累计 N 次提示
+      const hitMilestone = MILESTONES.find(n=>beforePlays < n && song.plays >= n);
+      if(hitMilestone){
+        toast(`💪 坚持练习！「${t}」已唱 ${hitMilestone} 次，继续加油`);
+      }
+      // 难度降级正反馈（仅自动推断时）
+      if(beforeDiff !== null){
+        const after = personalDiff(song);
+        if(beforeDiff !== after){
+          toast('🎉 这首歌你越来越熟了，难度感知降为「'+DIFF_LABEL[after]+'」');
+        }
+      }
+    }
+    // 唱完自动收录（仅未收录的歌，按开关）
+    if(song && !song.inMy && rateCollect){
+      song.inMy = true;
+      song.mine = true;
+      toast('已收录「'+t+'」到我的曲库');
+    }
+    removeFromKtv(t);
+    addHistory(t, who, skip ? 0 : rateStar, document.getElementById('rate-note').value.trim());
+    closeSheet('sheet-rate');
+    if(document.getElementById('karaoke').classList.contains('show')) closeKaraoke();
+    toast(skip ? `已记录「${t}」已唱` : `已记录「${t}」已唱，评分 ${rateStar||'—'} 星`);
+    setTimeout(doPick, 700);
+  }
+  function markPlayedFromKaraoke(){
+    openRate();
+  }
+  const FILTER_OPTS = {
+    lang: ['华语','粤语','英文','日韩'],
+    genre: ['抒情','摇滚','说唱','流行','古风'],
+    diff: ['简单','中等','困难'],
+    rating: ['★3 以上','★4 以上','★5'],
+  };
+  const selectedFilter = { lang:[], genre:[], diff:[], rating:[] };
+  let avoidRecent = true;
+
+  function renderFilterSheet(){
+    document.getElementById('fl-lang').innerHTML = FILTER_OPTS.lang.map(o=>`<span class="fl-opt ${selectedFilter.lang.includes(o)?'on':''}" onclick="toggleFilterOpt('lang','${o}')">${o}</span>`).join('');
+    document.getElementById('fl-genre').innerHTML = FILTER_OPTS.genre.map(o=>`<span class="fl-opt ${selectedFilter.genre.includes(o)?'on':''}" onclick="toggleFilterOpt('genre','${o}')">${o}</span>`).join('');
+    document.getElementById('fl-diff').innerHTML = FILTER_OPTS.diff.map(o=>`<span class="fl-opt ${selectedFilter.diff.includes(o)?'on':''}" onclick="toggleFilterOpt('diff','${o}')">${o}</span>`).join('');
+    document.getElementById('fl-rating').innerHTML = FILTER_OPTS.rating.map(o=>`<span class="fl-opt ${selectedFilter.rating.includes(o)?'on':''}" onclick="toggleFilterOpt('rating','${o}')">${o}</span>`).join('');
+  }
+  function toggleFilterOpt(group, opt){
+    const arr = selectedFilter[group];
+    const i = arr.indexOf(opt);
+    if(i>=0) arr.splice(i,1);
+    else arr.push(opt);
+    renderFilterSheet();
+  }
+  function applyFilter(){
+    updatePfStatus();
+    closeSheet('sheet-filter');
+  }
+  function resetFilter(){
+    selectedFilter.lang.length=0;
+    selectedFilter.genre.length=0;
+    selectedFilter.diff.length=0;
+    selectedFilter.rating.length=0;
+    renderFilterSheet();
+    updatePfStatus();
+  }
+  function toggleAvoid(){
+    avoidRecent = !avoidRecent;
+    document.getElementById('pf-avoid').classList.toggle('on', avoidRecent);
+    updatePfStatus();
+  }
+  function updatePfStatus(){
+    const parts = [];
+    if(selectedFilter.lang.length) parts.push(selectedFilter.lang.join('/'));
+    if(selectedFilter.genre.length) parts.push(selectedFilter.genre.join('/'));
+    if(selectedFilter.diff.length) parts.push(selectedFilter.diff.join('/'));
+    if(selectedFilter.rating.length) parts.push(selectedFilter.rating.join('/'));
+    const label = parts.length ? parts.join(' · ') : '全部';
+    document.getElementById('pf-status').textContent = label;
+    document.getElementById('pf-avoid').classList.toggle('on', avoidRecent);
+  }
+
+  function markPlayed(){
+    openRate();
+  }
+
+  document.querySelectorAll('.tab').forEach(t=>{
+    t.addEventListener('click', ()=>{
+      const isPick = t.dataset.tab==='pick';
+      const alreadyActive = t.classList.contains('active');
+      document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+      t.classList.add('active');
+      document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+      document.getElementById('tab-'+t.dataset.tab).classList.add('active');
+      const titles = {library:['曲库','收录的都是会唱的'], pick:['下一首唱什么？','随机选一首'], me:['我的','设置与管理']};
+      document.getElementById('bar-title').textContent = titles[t.dataset.tab][0];
+      document.getElementById('bar-sub').textContent = titles[t.dataset.tab][1];
+      const fab = document.getElementById('fab');
+      fab.style.display = t.dataset.tab==='library' ? 'flex' : 'none';
+      if(t.dataset.tab==='me') updateMeStats();
+      document.getElementById('content-scroll').scrollTop = 0;
+      // Pick tab 已激活再点：每次都抽卡（骰子动画）
+      if(isPick && alreadyActive){
+        const dice = t.querySelector('.pick-dice');
+        const btn = t.querySelector('.pick-btn');
+        if(dice){ dice.classList.remove('rolling'); void dice.offsetWidth; dice.classList.add('rolling'); }
+        if(btn){ btn.classList.remove('bump'); void btn.offsetWidth; btn.classList.add('bump'); }
+        doPick();
+      }
+    });
+  });
+
+  function renderKtvRows(){
+    const list = ktvList.length ? ktvList : [];
+    document.getElementById('pl-rows').innerHTML = list.length
+      ? list.map((s,i)=>`
+        <div class="song-item" style="padding:11px 4px">
+          <span style="width:22px; text-align:center; color:var(--text-dim); font-size:13px">${i+1}</span>
+          <div class="info"><div class="name">${s.t}</div><div class="artist">${s.a}</div></div>
+          <button class="more" onclick="toast('模拟：从 KTV 歌单移除')">×</button>
+        </div>`).join('')
+      : `<div style="text-align:center; color:var(--text-dim); padding:20px 0; font-size:13px">还没有攒歌，去我的曲库点"＋"加入吧</div>`;
+  }
+
+  let currentPlaylistType = 'normal';
+  function openPlaylistDetail(type){
+    currentPlaylistType = type;
+    if(type==='ktv'){
+      document.getElementById('pl-detail-title').textContent = '🎤 下一次 KTV';
+      document.getElementById('pl-detail-note').textContent = '为下次 KTV 攒好的歌 · 唱完自动移除 · 可一键清空';
+      document.getElementById('pl-collab-btn').style.display = 'none';
+      document.getElementById('pl-del-btn').textContent = '🧹 清空歌单';
+      document.getElementById('pl-del-btn').style.color = 'var(--warn)';
+      document.getElementById('pl-del-btn').style.borderColor = 'rgba(251,191,36,.4)';
+      renderKtvRows();
+    } else {
+      document.getElementById('pl-detail-title').textContent = '🎂 生日局';
+      document.getElementById('pl-detail-note').textContent = '原型说明：拖动 ⠿ 排序 · 从曲库加歌 · 邀请协作者共同编辑';
+      document.getElementById('pl-collab-btn').style.display = 'inline-flex';
+      document.getElementById('pl-del-btn').textContent = '🗑 删除歌单';
+      document.getElementById('pl-del-btn').style.color = 'var(--pink)';
+      document.getElementById('pl-del-btn').style.borderColor = 'rgba(255,79,216,.3)';
+    }
+    openSheet('sheet-pl-detail');
+  }
+  function askDelPlaylist(){
+    if(currentPlaylistType==='ktv'){
+      delConfirmMode = 'clear-ktv';
+      document.getElementById('del-confirm-title').textContent = `清空「下一次 KTV」？`;
+      document.getElementById('del-confirm-desc').textContent = `将移除所有攒好的歌。KTV 唱完后通常清空重置，可随时重新攒。`;
+      openSheet('sheet-del-confirm');
+    } else {
+      delConfirmMode = 'playlist';
+      document.getElementById('del-confirm-title').textContent = `删除歌单「生日局」？`;
+      document.getElementById('del-confirm-desc').textContent = `歌单将被永久删除，所有协作者的协作关系将解除。此操作不可撤销。`;
+      openSheet('sheet-del-confirm');
+    }
+  }
+  function clearKtvList(){
+    ktvList.length = 0;
+    ktvSongCount = 0;
+    document.getElementById('ktv-count').textContent = '0';
+    renderKtvRows();
+    closeSheet('sheet-del-confirm');
+    closeSheet('sheet-pl-detail');
+    toast('已清空「下一次 KTV」歌单');
+  }
+  function ktvDone(choice){
+    closeSheet('sheet-ktv-done');
+    if(choice==='clear'){
+      ktvList.length = 0;
+      ktvSongCount = 0;
+      document.getElementById('ktv-count').textContent = '0';
+      toast('已清空，为下次 KTV 重新攒歌吧');
+    } else {
+      toast('继续从全部曲库随机抽取');
+      doPick();
+    }
+  }
+
+  const ALL_USERS = ['林沐','阿杰','小苏','文轩','可欣'];
+  const COLLABS = [
+    {name:'林沐', role:'所有者'},
+    {name:'小苏', role:'协作者'},
+  ];
+  let collabPending = [];
+  function renderCollab(){
+    document.getElementById('collab-list').innerHTML = COLLABS.map((c,i)=>`
+      <div class="user-row">
+        <div class="u-info"><div class="u-name">${c.name}</div><div class="u-sub">${c.role}</div></div>
+        ${c.role==='所有者'
+          ? `<span class="role-badge role-admin">所有者</span>`
+          : `<button class="btn btn-ghost btn-sm" style="color:var(--pink)" onclick="removeCollab(${i})">移除</button>`}
+      </div>`).join('');
+    renderCollabCandidates();
+  }
+  function renderCollabCandidates(){
+    const kw = (document.getElementById('collab-search').value||'').trim();
+    const collabNames = COLLABS.map(c=>c.name);
+    const candidates = ALL_USERS.filter(u =>
+      !collabNames.includes(u) &&
+      (!kw || u.includes(kw))
+    );
+    const box = document.getElementById('collab-candidates');
+    if(!candidates.length){
+      box.innerHTML = `<div style="text-align:center; color:var(--text-dim); padding:14px 0; font-size:12px">没有可邀请的用户</div>`;
+      return;
+    }
+    box.innerHTML = candidates.map(u=>{
+      const checked = collabPending.includes(u);
+      return `
+      <div class="user-row" style="cursor:pointer" onclick="toggleCandidate('${u}')">
+        <div class="u-info"><div class="u-name">${u}</div><div class="u-sub">点击选择</div></div>
+        <span class="role-badge ${checked?'role-maint':'role-user'}">${checked?'✓ 已选':'选择'}</span>
+      </div>`;
+    }).join('');
+  }
+  function toggleCandidate(name){
+    const i = collabPending.indexOf(name);
+    if(i>=0) collabPending.splice(i,1);
+    else collabPending.push(name);
+    renderCollabCandidates();
+  }
+  function confirmCollab(){
+    if(!collabPending.length){ toast('请先选择要邀请的用户'); return; }
+    const names = collabPending.slice();
+    names.forEach(name=>{
+      COLLABS.push({name, role:'协作者'});
+    });
+    collabPending = [];
+    document.getElementById('collab-search').value='';
+    renderCollab();
+    toast('已邀请 '+names.length+' 位协作者');
+  }
+  function removeCollab(i){
+    const c = COLLABS[i];
+    COLLABS.splice(i,1);
+    renderCollab();
+    toast('已移除协作者「'+c.name+'」');
+  }
+
+  function openSheet(id){
+    if(id==='sheet-add') resetAddForm();
+    if(id==='sheet-pl-detail') renderKtvRows();
+    if(id==='sheet-users') renderUsers();
+    if(id==='sheet-collab') renderCollab();
+    if(id==='sheet-pending') renderPending();
+    if(id==='sheet-history') renderHistory();
+    if(id==='sheet-filter') renderFilterSheet();
+    if(id==='sheet-batch-edit') renderBatchEdit();
+    if(id==='sheet-backup') renderBackupList();
+    document.getElementById(id).classList.add('show');
+  }
+  function closeSheet(id){ document.getElementById(id).classList.remove('show'); }
+  document.querySelectorAll('.sheet-mask').forEach(m=>{
+    m.addEventListener('click', e=>{ if(e.target===m) m.classList.remove('show'); });
+  });
+
+  function groupHistory(){
+    // 按日期分组，保持时间倒序
+    const groups = [];
+    HISTORY.forEach(h=>{
+      let g = groups.find(x=>x.date===h.date);
+      if(!g){ g = {date:h.date, items:[]}; groups.push(g); }
+      g.items.push(h);
+    });
+    return groups;
+  }
+  function renderHistory(){
+    // 统计洞察
+    const playedTotal = HISTORY.filter(h=>h.status.startsWith('已唱')).length;
+    const todayCount = HISTORY.filter(h=>h.date==='今天').length;
+    const artistCount = {};
+    HISTORY.forEach(h=>{ artistCount[h.artist] = (artistCount[h.artist]||0) + 1; });
+    const favArtist = Object.entries(artistCount).sort((a,b)=>b[1]-a[1])[0];
+    document.getElementById('hist-stats').innerHTML = `
+      <div class="hs-item"><div class="v">${playedTotal}</div><div class="l">累计已唱</div></div>
+      <div class="hs-item"><div class="v">${todayCount}</div><div class="l">今天</div></div>
+      <div class="hs-item"><div class="v" style="font-size:15px">${favArtist ? favArtist[0] : '—'}</div><div class="l">最爱歌手</div></div>`;
+    const groups = groupHistory();
+    const expanded = new Set(['今天']); // 默认展开今天的组
+    document.getElementById('history-list').innerHTML = groups.map(g=>{
+      const playedCount = g.items.filter(i=>i.status.startsWith('已唱')).length;
+      const isOpen = expanded.has(g.date);
+      return `
+      <div class="hist-day">
+        <div class="hist-day-head" onclick="toggleHistDay('${g.date}', this)">
+          <span class="hist-arrow">${isOpen?'▾':'▸'}</span>
+          <span class="hist-day-label">${g.date}</span>
+          <span class="hist-day-count">${g.items.length} 首 · 唱了 ${playedCount}</span>
+        </div>
+        <div class="hist-items" ${isOpen?'':'style="display:none"'}>
+          ${g.items.map(h=>`
+            <div class="song-item" style="padding:11px 4px">
+              <div class="cover">🎤</div>
+              <div class="info">
+                <div class="name">${h.title}</div>
+                <div class="artist">${h.artist}</div>
+              </div>
+              <span class="tag" style="${h.status.startsWith('已唱')?'color:var(--green);border-color:rgba(52,211,153,.3)':'color:var(--text-dim)'}">${h.status}</span>
+              ${h.note?'<span style="font-size:10px;color:var(--text-dim);max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+h.note+'</span>':''}
+            </div>`).join('')}
+        </div>
+      </div>`;
+    }).join('');
+  }
+  function toggleHistDay(date, head){
+    const box = head.parentElement.querySelector('.hist-items');
+    const arrow = head.querySelector('.hist-arrow');
+    if(box.style.display==='none'){
+      box.style.display='block';
+      arrow.textContent='▾';
+    } else {
+      box.style.display='none';
+      arrow.textContent='▸';
+    }
+  }
+  function addHistory(title, artist, stars, note){
+    const status = stars>0 ? `已唱 ★${stars}` : '已唱 · 未评分';
+    HISTORY.unshift({date:'今天', title, artist, status, note: note||''});
+    renderHistory();
+  }
+
+  function hidePwa(){ document.getElementById('pwa-banner').style.display='none'; toast('模拟：已添加到主屏幕'); }
+
+  function goLogin(){
+    toast('模拟：管理员创建成功');
+    document.getElementById('page-setup').style.display='none';
+    document.getElementById('page-login').style.display='flex';
+  }
+  function enterApp(){
+    toast('模拟：登录成功');
+    document.getElementById('page-login').style.display='none';
+    document.getElementById('page-main').style.display='flex';
+    checkWelcome();
+  }
+  function checkWelcome(){
+    try{
+      const now = Date.now();
+      const last = Number(localStorage.getItem('picknext_last_visit')) || 0;
+      const banner = document.getElementById('welcome-banner');
+      if(last && (now - last) > 3*24*3600*1000){
+        const days = Math.floor((now - last) / (24*3600*1000));
+        const ktvN = ktvList.length;
+        document.getElementById('wb-txt').innerHTML = `<b>欢迎回来！</b>上次使用是 ${days} 天前${ktvN?`，你攒了 <b>${ktvN}</b> 首「下一次 KTV」的歌`:''}`;
+        banner.style.display = 'flex';
+      } else {
+        banner.style.display = 'none';
+      }
+      localStorage.setItem('picknext_last_visit', String(now));
+    }catch(e){}
+  }
+  function goToKtv(){
+    document.getElementById('welcome-banner').style.display = 'none';
+    // 跳到歌单视图
+    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    document.querySelector('.tab[data-tab=library]').classList.add('active');
+    document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+    document.getElementById('tab-library').classList.add('active');
+    setLibView('mine');
+    setMineSub('plists');
+  }
+  function closeWelcome(){
+    document.getElementById('welcome-banner').style.display = 'none';
+  }
+
+  function toast(msg){
+    const wrap = document.getElementById('toasts');
+    const t = document.createElement('div');
+    t.className = 'toast'; t.textContent = msg;
+    wrap.appendChild(t);
+    setTimeout(()=>t.remove(), 2200);
+  }
+</script>
+</body>
+</html>

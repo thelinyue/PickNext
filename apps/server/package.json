@@ -1,0 +1,34 @@
+{
+  "name": "@picknext/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/dev.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "seed:test": "node dist/seed-test-data.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run src"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/jwt": "^10.0.0",
+    "@fastify/middie": "^9.3.2",
+    "@fastify/static": "^9.0.0",
+    "@picknext/pick-engine": "workspace:*",
+    "@picknext/shared": "workspace:*",
+    "better-sqlite3": "^12.4.1",
+    "fastify": "^5.6.2",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/connect": "^3.4.38",
+    "@types/node": "^24.10.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vite": "^8.1.0",
+    "vitest": "^4.0.4"
+  }
+}

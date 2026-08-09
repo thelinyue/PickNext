@@ -1,0 +1,9 @@
+node_modules
+**/dist
+.git
+.tmp
+data
+prototype
+coverage
+playwright-report
+test-results

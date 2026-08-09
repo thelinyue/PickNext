@@ -1,0 +1,11 @@
+{
+  "name": "PickNext · 话筒递给我",
+  "short_name": "PickNext",
+  "description": "替你决定下一首会唱的歌",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090812",
+  "theme_color": "#090812",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }],
+  "share_target": { "action": "/?share=1", "method": "GET", "params": { "title": "title", "text": "text", "url": "url" } }
+}

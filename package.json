@@ -1,0 +1,23 @@
+{
+  "name": "picknext",
+  "private": true,
+  "packageManager": "pnpm@11.16.0",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "dev": "pnpm --filter @picknext/server dev",
+    "build": "pnpm --filter @picknext/shared build && pnpm --filter @picknext/pick-engine build && pnpm --filter @picknext/web build && pnpm --filter @picknext/server build",
+    "lint": "eslint .",
+    "typecheck": "pnpm --filter @picknext/shared typecheck && pnpm --filter @picknext/shared build && pnpm --filter @picknext/pick-engine typecheck && pnpm --filter @picknext/pick-engine build && pnpm --filter @picknext/server typecheck && pnpm --filter @picknext/web typecheck",
+    "test": "pnpm -r --if-present test",
+    "test:e2e": "pnpm build && playwright test",
+    "start": "pnpm --filter @picknext/server start"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "@playwright/test": "^1.58.0",
+    "eslint": "^9.39.0",
+    "globals": "^16.5.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.0"
+  }
+}
