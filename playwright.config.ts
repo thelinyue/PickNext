@@ -18,8 +18,7 @@ export default defineConfig({
       ...process.env,
       NODE_ENV: 'production',
       PORT: e2ePort,
-      DATABASE_PATH: e2eDatabase,
-      JWT_SECRET: 'e2e-secret-with-more-than-thirty-two-characters'
+      DATABASE_PATH: e2eDatabase
     }
   }
 });

@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
 import jwt from '@fastify/jwt';
@@ -74,13 +74,30 @@ function currentUser(request: FastifyRequest): UserPayload {
   return request.user as UserPayload;
 }
 
+/**
+ * 会话签名密钥属于服务内部数据，不要求非技术部署者手工配置。
+ * 首次启动时生成高强度随机值并写入 SQLite，数据库卷保留期间会稳定复用。
+ */
+function getOrCreateSessionSecret(db: AppContext['db']): string {
+  const existing = db.prepare("SELECT value FROM app_settings WHERE key = 'session_secret'").get() as { value: string } | undefined;
+  if (existing?.value) return existing.value;
+  const generated = randomBytes(32).toString('hex');
+  db.prepare(`
+    INSERT INTO app_settings(key, value, updated_at) VALUES ('session_secret', ?, datetime('now'))
+    ON CONFLICT(key) DO NOTHING
+  `).run(generated);
+  const stored = db.prepare("SELECT value FROM app_settings WHERE key = 'session_secret'").get() as { value: string } | undefined;
+  if (!stored?.value) throw new Error('无法生成会话安全密钥，请检查 SQLite 数据库写入权限。');
+  return stored.value;
+}
+
 /** Fastify 应用工厂保持无全局状态，测试可用 inject() 连接独立内存数据库。 */
 export async function buildApp(context: AppContext) {
   const app = Fastify({ logger: process.env.NODE_ENV !== 'test' });
   const pickService = new PickService(context.db);
   await app.register(cookie);
   await app.register(jwt, {
-    secret: process.env.JWT_SECRET ?? '仅供本地开发-生产环境必须设置-JWT_SECRET-至少32位',
+    secret: getOrCreateSessionSecret(context.db),
     cookie: { cookieName: 'picknext_session', signed: false }
   });
 

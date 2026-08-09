@@ -4,12 +4,8 @@ services:
     ports:
       - "5560:5560"
     environment:
-      JWT_SECRET: ${JWT_SECRET:?请在 .env 中设置至少32位的 JWT_SECRET}
       # 可在 .env 中设置 TZ，例如 TZ=UTC；未设置时使用东八区。
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
-      - picknext-data:/data
+      - ./data:/data
     restart: unless-stopped
-
-volumes:
-  picknext-data:

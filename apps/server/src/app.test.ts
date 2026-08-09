@@ -11,7 +11,6 @@ let app: FastifyInstance;
 
 beforeEach(async () => {
   process.env.NODE_ENV = 'test';
-  process.env.JWT_SECRET = 'test-secret-with-more-than-thirty-two-characters';
   database = new AppDatabase(':memory:', migrations);
   app = await buildApp({ db: database.db });
 });
@@ -27,6 +26,15 @@ async function setup(): Promise<string> {
 }
 
 describe('核心 API 纵向闭环', () => {
+  it('首次启动自动生成并稳定复用会话签名密钥', async () => {
+    const first = database.db.prepare("SELECT value FROM app_settings WHERE key = 'session_secret'").get() as { value: string };
+    expect(first.value).toMatch(/^[0-9a-f]{64}$/);
+    await app.close();
+    app = await buildApp({ db: database.db });
+    const second = database.db.prepare("SELECT value FROM app_settings WHERE key = 'session_secret'").get() as { value: string };
+    expect(second.value).toBe(first.value);
+  });
+
   it('未登录不能访问个人曲库', async () => {
     const response = await app.inject({ method: 'GET', url: '/api/songs' });
     expect(response.statusCode).toBe(401);

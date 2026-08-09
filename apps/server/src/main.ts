@@ -6,10 +6,6 @@ import { buildApp } from './app.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, '../../..');
-if (process.env.NODE_ENV === 'production' && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) {
-  console.error('PickNext 启动失败：生产环境必须设置至少 32 位的 JWT_SECRET。');
-  process.exit(1);
-}
 const databasePath = process.env.DATABASE_PATH ?? resolve(projectRoot, 'data/picknext.db');
 mkdirSync(dirname(databasePath), { recursive: true });
 
