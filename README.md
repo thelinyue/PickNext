@@ -57,23 +57,91 @@ docker exec -e ALLOW_TEST_SEED=1 <容器名> node apps/server/dist/seed-test-dat
 | `snooze_demo` | 大部分歌曲处于冷藏期 |
 | `skip_demo` | 同一歌曲连续 3 个场次跳过 |
 
-## Docker
+## Docker Compose 部署
 
-创建 `.env`：
+v0.1.0 镜像发布在 GitHub Container Registry，仅提供 `linux/amd64`：
 
 ```text
-JWT_SECRET=请替换为至少32位的随机字符串
+ghcr.io/thelinyue/picknext:0.1.0
 ```
 
-然后运行：
+在部署目录创建 `docker-compose.yml`：
+
+```yaml
+services:
+  picknext:
+    image: ghcr.io/thelinyue/picknext:0.1.0
+    ports:
+      - "${APP_PORT:-5560}:5560"
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?请在 .env 中设置至少 32 位的 JWT_SECRET}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - picknext-data:/data
+    restart: unless-stopped
+
+volumes:
+  picknext-data:
+```
+
+在同一目录创建 `.env`：
+
+```dotenv
+# 必填，请替换为随机且至少 32 位的字符串，不要使用示例值。
+JWT_SECRET=replace-with-a-random-secret-at-least-32-characters
+
+# 可选：宿主机访问端口及容器时区。
+APP_PORT=5560
+TZ=Asia/Shanghai
+```
+
+`JWT_SECRET` 是服务端签名和校验登录会话的私密密钥，不是管理员或普通用户的登录密码。不同部署应使用不同的随机值，并且不要把 `.env` 提交到 Git。修改该值会使已有登录会话失效，但不会删除账号、歌曲或 SQLite 数据。可使用以下命令生成安全随机值：
 
 ```bash
-docker compose up --build
+openssl rand -hex 32
 ```
 
-应用地址为 http://localhost:5560，SQLite 数据保存在命名卷 `picknext-data`。镜像使用非 root 用户，内置健康检查；同一 Dockerfile 可用于 amd64 与 arm64 的 buildx 构建。
+启动并检查运行状态：
 
-容器默认使用 `Asia/Shanghai`（东八区）。如需其他时区，在 `.env` 中设置 IANA 时区名，例如 `TZ=UTC` 或 `TZ=America/New_York`，然后重新创建容器。
+```bash
+docker compose pull
+docker compose up -d
+docker compose ps
+docker compose logs -f picknext
+```
+
+若 GHCR 包尚未设置为 Public，需要先使用具有 `read:packages` 权限的 GitHub Token 登录：
+
+```bash
+echo "$GHCR_TOKEN" | docker login ghcr.io -u <GitHub用户名> --password-stdin
+```
+
+浏览器访问 `http://服务器地址:5560`。首次打开会引导创建管理员。SQLite 数据保存在命名卷 `picknext-data`，重新创建或升级容器不会删除数据。请勿使用 `docker compose down -v`，否则会删除数据卷。
+
+升级镜像版本时，先备份数据卷，再修改 `image` 标签并运行：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `JWT_SECRET` | 无 | 生产环境必填，至少 32 位；更换后已有登录会话会失效。 |
+| `TZ` | `Asia/Shanghai` | 容器时区，使用 IANA 时区名，例如 `UTC`、`America/New_York`。 |
+| `APP_PORT` | `5560` | Compose 使用的宿主机端口，不改变容器内统一端口。 |
+| `PORT` | `5560` | Web、API 和健康检查共用的容器端口；使用上方 Compose 时不要修改。 |
+| `DATABASE_PATH` | `/data/picknext.db` | SQLite 文件位置；使用命名卷部署时不要修改。 |
+| `HOST` | `0.0.0.0` | 服务监听地址；容器部署时不要改为 `127.0.0.1`。 |
+| `NODE_ENV` | `production` | 已在镜像中设置，无需在 Compose 中重复配置。 |
+
+仓库自带的 `docker-compose.yml` 使用本地 `Dockerfile` 构建，适合开发或自行修改代码后的验证：
+
+```bash
+docker compose up -d --build
+```
 
 ## 工程结构
 
