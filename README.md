@@ -59,10 +59,10 @@ docker exec -e ALLOW_TEST_SEED=1 <容器名> node apps/server/dist/seed-test-dat
 
 ## Docker Compose 部署
 
-v0.1.1 镜像发布在 GitHub Container Registry，仅提供 `linux/amd64`：
+v0.1.2 镜像发布在 GitHub Container Registry，仅提供 `linux/amd64`：
 
 ```text
-ghcr.io/thelinyue/picknext:0.1.1
+ghcr.io/thelinyue/picknext:0.1.2
 ```
 
 在部署目录创建 `docker-compose.yml`：
@@ -70,21 +70,23 @@ ghcr.io/thelinyue/picknext:0.1.1
 ```yaml
 services:
   picknext:
-    image: ghcr.io/thelinyue/picknext:0.1.1
+    image: ghcr.io/thelinyue/picknext:0.1.2
     ports:
-      - "${APP_PORT:-5560}:5560"
+      - "5560:5560"
     environment:
-      TZ: ${TZ:-Asia/Shanghai}
+      TZ: Asia/Shanghai
     volumes:
       - ./data:/data
     restart: unless-stopped
 ```
 
-如需修改宿主机端口或时区，在同一目录创建 `.env`；不创建时使用默认值：
+上方配置不依赖 `.env` 文件，复制后即可部署。如需修改宿主机端口或时区，直接编辑 `docker-compose.yml`：
 
-```dotenv
-APP_PORT=5560
-TZ=Asia/Shanghai
+```yaml
+ports:
+  - "8080:5560"
+environment:
+  TZ: UTC
 ```
 
 启动并检查运行状态：

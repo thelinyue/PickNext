@@ -75,6 +75,19 @@ function currentUser(request: FastifyRequest): UserPayload {
 }
 
 /**
+ * 只有浏览器通过 HTTPS 访问时才设置 Secure Cookie。
+ *
+ * PickNext 支持直接以 HTTP 部署在内网；生产环境标记本身不能代表当前请求
+ * 一定使用 HTTPS，否则浏览器会拒绝保存登录会话，导致登录接口成功后仍回到登录页。
+ * 反向代理场景下同时读取 X-Forwarded-Proto，兼容 HTTPS 代理到 HTTP 应用进程。
+ */
+function isHttpsRequest(request: FastifyRequest): boolean {
+  const forwardedProto = request.headers['x-forwarded-proto'];
+  const proxyProtocol = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+  return request.protocol === 'https' || proxyProtocol?.split(',')[0]?.trim().toLowerCase() === 'https';
+}
+
+/**
  * 会话签名密钥属于服务内部数据，不要求非技术部署者手工配置。
  * 首次启动时生成高强度随机值并写入 SQLite，数据库卷保留期间会稳定复用。
  */
@@ -156,13 +169,13 @@ export async function buildApp(context: AppContext) {
     }
   };
 
-  const issueSession = async (reply: FastifyReply, user: UserPayload) => {
+  const issueSession = async (request: FastifyRequest, reply: FastifyReply, user: UserPayload) => {
     const token = await reply.jwtSign(user, { expiresIn: '30d' });
     reply.setCookie('picknext_session', token, {
       path: '/',
       httpOnly: true,
       sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
+      secure: isHttpsRequest(request),
       maxAge: 30 * 24 * 60 * 60
     });
   };
@@ -183,7 +196,7 @@ export async function buildApp(context: AppContext) {
     `).run(body.username, await hashPassword(body.password));
     const user: UserPayload = { id: Number(result.lastInsertRowid), username: body.username, role: 'admin', isMaintainer: false, canAddSongs: true };
     context.db.prepare(`INSERT INTO playlists(owner_id, name, kind) VALUES (?, '下一次 KTV', 'next_ktv')`).run(user.id);
-    await issueSession(reply, user);
+    await issueSession(request, reply, user);
     return { user };
   });
 
@@ -204,7 +217,7 @@ export async function buildApp(context: AppContext) {
       canAddSongs: Boolean(row.can_add_songs)
     };
     context.db.prepare("UPDATE users SET last_login_at = datetime('now') WHERE id = ?").run(user.id);
-    await issueSession(reply, user);
+    await issueSession(request, reply, user);
     return { user };
   });
 
@@ -226,7 +239,7 @@ export async function buildApp(context: AppContext) {
       context.db.prepare(`INSERT INTO playlists(owner_id, name, kind) VALUES (?, '下一次 KTV', 'next_ktv')`).run(created.id);
       return created;
     })();
-    await issueSession(reply, user);
+    await issueSession(request, reply, user);
     return reply.code(201).send({ user });
   });
 

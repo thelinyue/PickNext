@@ -56,6 +56,18 @@ describe('核心 API 纵向闭环', () => {
     expect((await app.inject({ method: 'GET', url: '/api/playlists/next-ktv', headers: { cookie: userCookie } })).json().playlist).not.toBeNull();
   });
 
+  it('会根据当前请求协议设置登录 Cookie 的 Secure 属性', async () => {
+    const httpSetup = await app.inject({ method: 'POST', url: '/api/setup', payload: { username: 'singer', password: 'password123' } });
+    const httpCookie = String(httpSetup.headers['set-cookie']);
+    expect(httpCookie).not.toContain('; Secure');
+
+    const httpsLogin = await app.inject({
+      method: 'POST', url: '/api/auth/login', headers: { 'x-forwarded-proto': 'https' },
+      payload: { username: 'singer', password: 'password123' }
+    });
+    expect(String(httpsLogin.headers['set-cookie'])).toContain('; Secure');
+  });
+
   it('初始化、收歌、幂等 Pick、唱完和历史可完整运行', async () => {
     const cookie = await setup();
     const created = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie }, payload: {
