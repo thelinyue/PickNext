@@ -172,6 +172,14 @@ export const pickedSongSchema = z.object({
   keyShift: z.number().int().min(-12).max(12).nullable()
 });
 
+/** 连续跳过建议必须携带原歌曲，客户端才能在下一首已经展示后继续处理它。 */
+export const skipSuggestionSchema = z.object({
+  songId: z.number().int().positive(),
+  title: z.string(),
+  artist: z.string(),
+  version: z.string().nullable()
+});
+
 export const pickResponseSchema = z.object({
   sessionId: z.string().uuid(),
   eventId: z.string().uuid(),
@@ -181,7 +189,7 @@ export const pickResponseSchema = z.object({
   reason: z.string(),
   recentFilterRelaxed: z.boolean(),
   algorithmVersion: z.string(),
-  skipSuggestion: z.boolean().default(false)
+  skipSuggestion: skipSuggestionSchema.nullable().default(null)
 });
 export type PickResponse = z.infer<typeof pickResponseSchema>;
 

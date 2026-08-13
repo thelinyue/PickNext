@@ -9,6 +9,12 @@ import { BasicSongCard, Button, EmptyState, IconButton, PageHeader, Sheet, SongC
 interface PlaylistSummary { id: number; name: string; songCount: number; access?: 'owner' | 'collaborator' }
 interface KtvSong { id: number; title: string; artist: string; version: string | null }
 
+export interface SongPrefill {
+  title: string;
+  artist?: string;
+  version?: string;
+}
+
 const emptyFilters = (): LibraryFilters => ({ languages: [], genres: [], difficulties: [], scene: 'all' });
 const alphabet = [...'ABCDEFGHIJKLMNOPQRSTUVWXYZ', '#'];
 const sceneOptions: Record<string, Array<[LibraryScene, string]>> = {
@@ -17,7 +23,7 @@ const sceneOptions: Record<string, Array<[LibraryScene, string]>> = {
   global: [['all', '全部'], ['high', '⭐ 高分'], ['hard', '🔥 高难度'], ['new', '✨ 最近添加']]
 };
 
-export function LibraryPage({ notify, canEditGlobal, initialScope = 'personal' }: { notify(message: string): void; canEditGlobal: boolean; initialScope?: SongListScope }) {
+export function LibraryPage({ notify, canEditGlobal, initialScope = 'personal', initialAddSong, onSharedSongConsumed }: { notify(message: string): void; canEditGlobal: boolean; initialScope?: SongListScope; initialAddSong?: SongPrefill | null; onSharedSongConsumed?(): void }) {
   const client = useQueryClient();
   const [scope, setScope] = useState<SongListScope>(initialScope);
   const [collection, setCollection] = useState<CollectionType>('repertoire');
@@ -67,6 +73,8 @@ export function LibraryPage({ notify, canEditGlobal, initialScope = 'personal' }
   const shown = list.data?.pages.flatMap((page) => page.songs) ?? [];
   const counts = list.data?.pages[0]?.counts;
   const resultMeta = list.data?.pages[0];
+
+  useEffect(() => { if (initialAddSong) setAddOpen(true); }, [initialAddSong]);
 
   const updateCollection = useMutation({
     mutationFn: ({ id, target }: { id: number; target: CollectionType }) => api(`/api/user-songs/${id}/collection`, { method: 'PUT', body: JSON.stringify({ collectionType: target }) }),
@@ -136,11 +144,10 @@ export function LibraryPage({ notify, canEditGlobal, initialScope = 'personal' }
   return <section className="page library-page"><PageHeader eyebrow="你的歌，随时想得起来" title="曲库" action={<div className="library-header-actions">{scope === 'personal' && <Button className="secondary compact" onClick={() => selectionMode ? leaveSelectionMode() : setSelectionMode(true)}><ListChecks size={17} />{selectionMode ? '取消批量' : '批量管理'}</Button>}<IconButton label="添加歌曲" onClick={() => setAddOpen(true)}><Plus /></IconButton></div>} />
     <button className="ktv-card" onClick={() => setKtvOpen(true)}><span className="ktv-icon"><Mic2 /></span><span className="ktv-copy"><strong>下一次 KTV</strong><small>{ktv.data?.songs.length ? `已经准备 ${ktv.data.songs.length} 首 · Pick 时优先` : '先攒几首想唱的歌，Pick 时优先'}</small></span><span className="ktv-count">{ktv.data?.songs.length ?? 0}</span><ChevronRight size={19} /></button>
     <div className="library-search-row"><div className="search-box"><Search size={19} /><input aria-label="搜索歌曲" placeholder="歌名、歌手、拼音或别名" value={search} onChange={(event) => setSearch(event.target.value)} /></div><IconButton label="筛选歌曲" onClick={() => setFiltersOpen(true)}><Filter />{activeFilterCount(filters) > 0 && <small className="filter-count">{activeFilterCount(filters)}</small>}</IconButton></div>
-    <Tabs.Root value={scope} onValueChange={(value) => setScope(value as SongListScope)}><Tabs.List className="tabs scope-tabs" aria-label="曲库范围"><Tabs.Trigger value="personal">我的曲库 <small>{counts?.personal ?? 0}</small></Tabs.Trigger><Tabs.Trigger value="global">全部曲库 <small>{counts?.global ?? 0}</small></Tabs.Trigger></Tabs.List></Tabs.Root>
-    {scope === 'personal' && <Tabs.Root value={collection} onValueChange={(value) => setCollection(value as CollectionType)}><Tabs.List className="tabs collection-tabs" aria-label="个人曲库分类"><Tabs.Trigger value="repertoire">会唱 <small>{counts?.repertoire ?? 0}</small></Tabs.Trigger><Tabs.Trigger value="learning">待学 <small>{counts?.learning ?? 0}</small></Tabs.Trigger></Tabs.List></Tabs.Root>}
+    <Tabs.Root value={scope} onValueChange={(value) => setScope(value as SongListScope)}><Tabs.List className="tabs scope-tabs" aria-label="曲库范围"><Tabs.Trigger value="personal">我的曲库 <small>{counts?.personal ?? 0}</small></Tabs.Trigger><Tabs.Trigger value="global">全部曲库 <small>{counts?.global ?? 0}</small><span className="collection-help" title="全站共享歌曲，只展示公共资料和匿名评分" aria-label="全站共享歌曲，只展示公共资料和匿名评分">?</span></Tabs.Trigger></Tabs.List></Tabs.Root>
+    {scope === 'personal' && <Tabs.Root value={collection} onValueChange={(value) => setCollection(value as CollectionType)}><Tabs.List className="tabs collection-tabs" aria-label="个人曲库分类"><Tabs.Trigger value="repertoire">会唱 <small>{counts?.repertoire ?? 0}</small><span className="collection-help" title="普通 Pick 只从这里选择歌曲" aria-label="普通 Pick 只从这里选择歌曲">?</span></Tabs.Trigger><Tabs.Trigger value="learning">待学 <small>{counts?.learning ?? 0}</small><span className="collection-help" title="正在学习的歌曲不会进入普通 Pick" aria-label="正在学习的歌曲不会进入普通 Pick">?</span></Tabs.Trigger></Tabs.List></Tabs.Root>}
     <div className="scene-chips" aria-label="快捷筛选">{(sceneOptions[viewKey] ?? []).map(([value, label]) => <button key={value} className={filters.scene === value ? 'active' : ''} onClick={() => setScene(value)}>{label}</button>)}{filters.scene === 'custom' && <button className="active">自定义</button>}</div>
-    <p className="library-context">{scope === 'global' ? '全站共享歌曲，只展示公共资料和匿名评分' : collection === 'repertoire' ? '普通 Pick 只从这里选择歌曲' : '正在学习的歌曲不会进入普通 Pick'}</p>
-    <div className="library-result-head"><span>{list.isLoading ? '正在查找…' : `找到 ${resultMeta?.total ?? 0} 首`}</span>{activeFilterCount(filters) > 0 && <button onClick={clearFilters}><RotateCcw size={14} />清除筛选</button>}</div>
+    {activeFilterCount(filters) > 0 && <div className="library-result-head"><button onClick={clearFilters}><RotateCcw size={14} />清除筛选</button></div>}
     {selectionMode && selectedIds.size > 0 && <div className="batch-toolbar" role="region" aria-label="批量曲库操作"><span>已选 {selectedIds.size} 首</span><Button onClick={() => setBatchOpen(true)}>选择操作</Button><button className="text-action" onClick={() => setSelectedIds(new Set())}>清空选择</button></div>}
     <div className="library-list-wrap"><div className="song-list alphabet-song-list">{shown.map((song, index) => <div key={`${song.scope}-${song.id}`} className={`alphabet-song-group ${selectionMode && selectedIds.has(song.id) ? 'selection-selected' : ''}`}>{(index === 0 || shown[index - 1]?.titleInitial !== song.titleInitial) && <h3 id={`song-group-${song.titleInitial}`} className="alphabet-group-title">{song.titleInitial}</h3>}{selectionMode && song.scope === 'personal' && <label className="song-selection"><input type="checkbox" checked={selectedIds.has(song.id)} onChange={() => toggleSelection(song.id)} aria-label={`选择${song.title}`} /><span>选择</span></label>}<SongCard song={song} variant={cardVariant(song)} onClick={() => selectionMode && song.scope === 'personal' ? toggleSelection(song.id) : setDetail(song)} action={selectionMode && song.scope === 'personal' ? undefined : song.scope === 'personal' ? song.collectionType === 'repertoire'
       ? <IconButton label={`将${song.title}加入下一次 KTV`} onClick={() => addKtv.mutate(song.id)}><ListPlus size={19} /></IconButton>
@@ -155,7 +162,7 @@ export function LibraryPage({ notify, canEditGlobal, initialScope = 'personal' }
         : <Button onClick={() => setAddOpen(true)}><Plus size={18} />添加歌曲</Button>}
     />}
     {list.hasNextPage && <Button className="secondary load-more" disabled={list.isFetchingNextPage} onClick={() => list.fetchNextPage()}>{list.isFetchingNextPage ? '正在加载' : '加载更多'}</Button>}
-    <AddSongSheet open={addOpen} onOpenChange={setAddOpen} defaultCollection={collection} onAdded={async (message) => { setAddOpen(false); await client.invalidateQueries({ queryKey: ['library-search'] }); notify(message); }} />
+    <AddSongSheet key={`${initialAddSong?.title ?? ''}|${initialAddSong?.artist ?? ''}|${initialAddSong?.version ?? ''}`} open={addOpen} onOpenChange={(open) => { setAddOpen(open); if (!open) onSharedSongConsumed?.(); }} defaultCollection={collection} prefill={initialAddSong ?? null} onAdded={async (message) => { setAddOpen(false); onSharedSongConsumed?.(); await client.invalidateQueries({ queryKey: ['library-search'] }); notify(message); }} />
     <BatchActionSheet open={batchOpen} count={selectedIds.size} onOpenChange={setBatchOpen} loading={batchUpdate.isPending} onAction={(body) => batchUpdate.mutate(body)} />
     <Sheet open={detail !== null} onOpenChange={(open) => !open && setDetail(null)} title="歌曲操作">{detail && <div className="sheet-stack"><SongCard song={detail} variant={cardVariant(detail)} />{canEditGlobal && <Button className="secondary" onClick={() => { setEditSong(detail); setDetail(null); }}><Pencil size={18} />编辑全局歌曲信息</Button>}{detail.scope === 'global' ? detail.collectionType === null ? <>
       <Button onClick={() => updateCollection.mutate({ id: detail.id, target: 'repertoire' })}>我会唱，加入会唱曲库</Button>
@@ -314,12 +321,29 @@ function parseLrc(input: string): LrcLine[] {
 }
 
 interface DuplicateMatch { id: number; title: string; artist: string; version: string | null }
+type CollectionChoice = CollectionType | null;
+const ADD_SONG_COLLECTION_STORAGE_KEY = 'picknext:add-song-collection';
 
-function AddSongSheet({ open, onOpenChange, defaultCollection, onAdded }: { open: boolean; onOpenChange(open: boolean): void; defaultCollection: 'repertoire' | 'learning'; onAdded(message: string): void }) {
+/** 只记住添加歌曲表单的收录位置偏好，不保存歌曲内容等用户数据。 */
+function readRememberedCollection(): CollectionChoice | undefined {
+  try {
+    const value = localStorage.getItem(ADD_SONG_COLLECTION_STORAGE_KEY);
+    if (value === 'repertoire' || value === 'learning') return value;
+    if (value === 'global') return null;
+  } catch { /* 浏览器禁用本地存储时回退到当前曲库。 */ }
+  return undefined;
+}
+
+function AddSongSheet({ open, onOpenChange, defaultCollection, prefill, onAdded }: { open: boolean; onOpenChange(open: boolean): void; defaultCollection: 'repertoire' | 'learning'; prefill?: SongPrefill | null; onAdded(message: string): void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [duplicate, setDuplicate] = useState<{ code: string; matches: DuplicateMatch[] } | null>(null);
   const [pendingPayload, setPendingPayload] = useState<Record<string, unknown> | null>(null);
+  const [collectionType, setCollectionType] = useState<CollectionChoice>(() => {
+    const remembered = readRememberedCollection();
+    return remembered === undefined ? defaultCollection : remembered;
+  });
+  const [rememberCollection, setRememberCollection] = useState(true);
   const formRef = useRef<HTMLFormElement>(null);
   const send = async (payload: Record<string, unknown>) => {
     setBusy(true); setError('');
@@ -327,6 +351,10 @@ function AddSongSheet({ open, onOpenChange, defaultCollection, onAdded }: { open
       const result = await api<{ status: 'created' | 'reused' | 'pending_review' }>('/api/songs', { method: 'POST', body: JSON.stringify(payload) });
       formRef.current?.reset(); setDuplicate(null); setPendingPayload(null);
       const collectionType = payload.collectionType as CollectionType | null;
+      if (rememberCollection) {
+        try { localStorage.setItem(ADD_SONG_COLLECTION_STORAGE_KEY, collectionType ?? 'global'); }
+        catch { /* 本地存储不可用时不影响歌曲提交。 */ }
+      } else setCollectionType(defaultCollection);
       onAdded(result.status === 'pending_review'
         ? '已提交审核，管理员确认后会按本次选择处理'
         : collectionType
@@ -352,19 +380,22 @@ function AddSongSheet({ open, onOpenChange, defaultCollection, onAdded }: { open
     });
   };
   const resolve = (action: 'reuse' | 'submit_review' | 'create_anyway', matchedSongId?: number) => pendingPayload && send({ ...pendingPayload, duplicateAction: action, matchedSongId });
-  return <Sheet open={open} onOpenChange={(value) => { onOpenChange(value); if (!value) { setDuplicate(null); setError(''); } }} title="收一首歌">
+  return <Sheet open={open} onOpenChange={(value) => { onOpenChange(value); if (!value) { setDuplicate(null); setError(''); } }} title="添加歌曲">
     <form ref={formRef} className="form-stack" onSubmit={submit}>
-      <label>歌名<input name="title" required maxLength={120} autoFocus /></label>
-      <label>歌手<input name="artist" required maxLength={120} /></label>
-      <div className="form-grid"><label>版本<input name="version" placeholder="Live / 女声版" /></label><label>语种<input name="language" placeholder="国语" /></label></div>
-      <div className="form-grid"><label>曲风<input name="genre" placeholder="流行" /></label><label>演唱类型<select name="performanceType"><option value="solo">独唱</option><option value="duet">对唱</option><option value="chorus">合唱</option></select></label></div>
-      <div className="form-grid"><label>参考难度<select name="difficulty"><option value="">未设置</option><option value="easy">简单</option><option value="medium">中等</option><option value="hard">困难</option></select></label><label>我的难度<select name="personalDifficulty"><option value="">使用参考难度</option><option value="easy">简单</option><option value="medium">中等</option><option value="hard">困难</option></select></label></div>
-      <label>别名（每行一个）<textarea name="aliases" placeholder="粤语版\n现场版" /></label>
-      <label>个人归属<select name="collectionType" defaultValue={defaultCollection}><option value="learning">待学清单</option><option value="repertoire">会唱曲库</option><option value="">仅维护全局资料，不收录到我的个人曲库</option></select></label>
-      <label>我的备注<textarea name="note" placeholder="副歌高音、进歌提示……" /></label>
-      <p className="helper">不收录时歌曲仍会进入全部曲库，但不会影响你的个人曲库和 Pick。</p>
+      <label>歌名<input name="title" required maxLength={120} autoFocus defaultValue={prefill?.title ?? ''} /></label>
+      <label>歌手<input name="artist" required maxLength={120} defaultValue={prefill?.artist ?? ''} /></label>
+      <label>收录位置<select name="collectionType" value={collectionType ?? ''} onChange={(event) => setCollectionType((event.target.value || null) as CollectionChoice)}><option value="learning">待学清单</option><option value="repertoire">会唱曲库</option><option value="">仅添加到全部曲库（不加入我的个人曲库）</option></select></label>
+      <label className="check-row"><input type="checkbox" checked={rememberCollection} onChange={(event) => setRememberCollection(event.target.checked)} /><span>下次添加歌曲时默认使用此收录位置</span></label>
+      <details className="complete-details"><summary>高级选项</summary><div className="form-stack">
+        <div className="form-grid"><label>版本<input name="version" placeholder="Live / 女声版" defaultValue={prefill?.version ?? ''} /></label><label>语种<input name="language" placeholder="国语" /></label></div>
+        <div className="form-grid"><label>曲风<input name="genre" placeholder="流行" /></label><label>演唱类型<select name="performanceType"><option value="solo">独唱</option><option value="duet">对唱</option><option value="chorus">合唱</option></select></label></div>
+        <div className="form-grid"><label>参考难度<select name="difficulty"><option value="">未设置</option><option value="easy">简单</option><option value="medium">中等</option><option value="hard">困难</option></select></label><label>我的难度<select name="personalDifficulty"><option value="">使用参考难度</option><option value="easy">简单</option><option value="medium">中等</option><option value="hard">困难</option></select></label></div>
+        <label>别名（每行一个）<textarea name="aliases" placeholder="粤语版\n现场版" /></label>
+        <label>我的备注<textarea name="note" placeholder="副歌高音、进歌提示……" /></label>
+        <p className="helper">选择仅添加到全部曲库时，歌曲不会进入你的个人曲库，也不会影响普通 Pick。</p>
+      </div></details>
       {error && <p className="form-error">{error}</p>}
-      <Button loading={busy} type="submit">收进曲库</Button>
+      <Button loading={busy} type="submit">添加歌曲</Button>
     </form>
     {duplicate && <div className="duplicate-panel"><h3>{duplicate.code === 'EXACT_DUPLICATE' ? '曲库中已有这首歌' : '发现相似歌曲'}</h3><p>{duplicate.code === 'EXACT_DUPLICATE' ? '直接复用可避免重复数据；继续新增需管理员审核。' : '请先确认是否可以复用已有歌曲。'}</p>{duplicate.matches.map((song) => <BasicSongCard key={song.id} song={song} action={<Button className="secondary compact" loading={busy} onClick={() => resolve('reuse', song.id)}>复用</Button>} />)}<div className="duplicate-actions">{duplicate.code === 'EXACT_DUPLICATE' ? <Button className="secondary" loading={busy} onClick={() => resolve('submit_review', duplicate.matches[0]?.id)}>提交审核</Button> : <Button className="secondary" loading={busy} onClick={() => resolve('create_anyway')}>仍然新增</Button>}</div></div>}
   </Sheet>;

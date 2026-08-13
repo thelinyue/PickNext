@@ -40,9 +40,9 @@ export class CatalogService {
              performance_type AS performanceType
       FROM songs
       WHERE status = 'active' AND id <> coalesce(@exactId, -1)
-        AND (normalized_title LIKE @titleLike OR normalized_artist LIKE @artistLike)
+        AND normalized_title LIKE @titleLike
       ORDER BY id LIMIT 50
-    `).all({ ...identity, exactId: exact?.id ?? null, titleLike: `%${identity.title}%`, artistLike: `%${identity.artist}%` }) as CatalogCandidate[];
+    `).all({ ...identity, exactId: exact?.id ?? null, titleLike: `%${identity.title}%` }) as CatalogCandidate[];
     return {
       exact,
       similar: candidates

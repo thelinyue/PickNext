@@ -29,6 +29,23 @@ test.describe.serial('PickNext v1.0 移动端核心闭环', () => {
     expect(reducedSeconds).toBeLessThanOrEqual(.001);
     await page.emulateMedia({ reducedMotion: 'no-preference' });
 
+    await page.goto('/?text=分享歌曲%20-%20分享歌手%20-%20Live');
+    const shareSheet = page.getByRole('dialog', { name: '添加歌曲' });
+    await expect(shareSheet).toBeVisible();
+    await expect(shareSheet.getByLabel('歌名')).toHaveValue('分享歌曲');
+    await expect(shareSheet.getByLabel('歌手')).toHaveValue('分享歌手');
+    await expect(shareSheet.getByLabel('版本')).toHaveValue('Live');
+    await shareSheet.getByRole('button', { name: '关闭' }).click();
+    await page.getByRole('button', { name: '我的' }).click();
+    await page.getByRole('button', { name: '批量收歌' }).click();
+    const importSheet = page.getByRole('dialog', { name: '批量收歌' });
+    await importSheet.locator('textarea.import-area').fill('title,artist,version\nCSV导入歌曲,CSV歌手,现场版');
+    await importSheet.getByLabel('导入格式').selectOption('csv');
+    await importSheet.getByRole('button', { name: '开始导入' }).click();
+    await expect(importSheet.getByText('导入完成')).toBeVisible();
+    await expect(importSheet.getByText('新增 1 首 · 复用 0 首')).toBeVisible();
+    await importSheet.getByRole('button', { name: '关闭' }).click();
+
     await page.getByRole('button', { name: '我的' }).click();
     await page.getByRole('button', { name: /用户与权限/ }).click();
     await page.getByLabel('允许普通用户注册').click();
@@ -50,21 +67,22 @@ test.describe.serial('PickNext v1.0 移动端核心闭环', () => {
 
     await page.getByRole('button', { name: '曲库', exact: true }).click();
     await page.locator('header').getByRole('button', { name: '添加歌曲' }).click();
-    const globalOnlySheet = page.getByRole('dialog', { name: '收一首歌' });
-    await globalOnlySheet.getByLabel('个人归属').selectOption({ label: '仅维护全局资料，不收录到我的个人曲库' });
+    const globalOnlySheet = page.getByRole('dialog', { name: '添加歌曲' });
+    await globalOnlySheet.locator('select[name="collectionType"]').selectOption({ label: '仅添加到全部曲库（不加入我的个人曲库）' });
     await globalOnlySheet.getByLabel('歌名').fill('全局维护歌曲');
     await globalOnlySheet.getByLabel('歌手').fill('维护歌手');
-    await globalOnlySheet.getByRole('button', { name: '收进曲库' }).click();
+    await globalOnlySheet.getByRole('button', { name: '添加歌曲' }).click();
     await page.getByRole('tab', { name: /全部曲库/ }).click();
     await expect(page.getByText('全局维护歌曲')).toBeVisible();
     await expect(page.locator('.collection-badge.uncollected')).toHaveText('未收录');
     await page.getByRole('tab', { name: /我的曲库/ }).click();
     await page.locator('header').getByRole('button', { name: '添加歌曲' }).click();
+    await page.getByText('高级选项', { exact: true }).click();
     await page.getByLabel('演唱类型').selectOption('solo');
-    await page.getByLabel('个人归属').selectOption('repertoire');
+    await page.locator('select[name="collectionType"]').selectOption('repertoire');
     await page.getByLabel('歌名').fill('晴天');
     await page.getByLabel('歌手').fill('周杰伦');
-    await page.getByRole('button', { name: '收进曲库' }).click();
+    await page.getByRole('button', { name: '添加歌曲' }).click();
     await expect(page.getByText('晴天')).toBeVisible();
 
     await page.getByRole('button', { name: '查看晴天详情' }).click();
@@ -149,6 +167,7 @@ test.describe.serial('PickNext v1.0 移动端核心闭环', () => {
     await expect(page.getByText('点歌历史')).toBeVisible();
     await page.getByRole('button', { name: /点歌历史/ }).click();
     const historyDialog = page.getByRole('dialog', { name: '点歌历史' });
+    await historyDialog.locator('details').first().locator('summary').click();
     await expect(historyDialog.getByText('晴天')).toBeVisible();
     await expect(historyDialog.getByText('海阔天空')).toBeVisible();
     await expect(historyDialog.locator('.history-status.skipped')).toHaveText('未唱');
@@ -167,8 +186,8 @@ test.describe.serial('PickNext v1.0 移动端核心闭环', () => {
     await page.locator('header').getByRole('button', { name: '添加歌曲' }).click();
     await page.getByRole('textbox', { name: '歌名', exact: true }).fill('普通用户的歌');
     await page.getByLabel('歌手').fill('测试歌手');
-    await page.getByLabel('个人归属').selectOption('repertoire');
-    await page.getByRole('button', { name: '收进曲库' }).click();
+    await page.locator('select[name="collectionType"]').selectOption('repertoire');
+    await page.getByRole('button', { name: '添加歌曲' }).click();
     await expect(page.getByText('普通用户的歌')).toBeVisible();
     expect(await page.evaluate(() => fetch('/api/songs/1', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: '越权', artist: '测试', performanceType: 'solo' }) }).then((response) => response.status))).toBe(403);
     await page.getByRole('button', { name: '开始 Pick' }).click();
@@ -188,5 +207,43 @@ test.describe.serial('PickNext v1.0 移动端核心闭环', () => {
     await page.getByRole('button', { name: '登录' }).click();
     await page.getByRole('button', { name: '我的' }).click();
     await expect(page.getByRole('heading', { name: 'registered-user' })).toBeVisible();
+  });
+
+  test('连续三场跳过会唱歌曲后可从界面执行冷藏', async ({ page }) => {
+    await page.goto('/');
+    await page.getByLabel('用户名').fill('singing-lover');
+    await page.getByLabel('密码').fill('password123');
+    await page.getByRole('button', { name: '登录' }).click();
+    await expect(page.getByRole('button', { name: '开始 Pick' })).toBeVisible();
+    const sequence = await page.evaluate(async () => {
+      const request = async (url: string, init?: RequestInit) => {
+        const response = await fetch(url, init);
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.message ?? `请求失败：${url}`);
+        return body;
+      };
+      const suffix = String(Date.now());
+      const target = await request('/api/songs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: `连续建议目标${suffix}`, artist: '歌手甲', language: '连续建议语种', collectionType: 'repertoire' }) });
+      const helper = await request('/api/songs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: `连续建议辅助${suffix}`, artist: '歌手乙', language: '连续建议语种', collectionType: 'repertoire' }) });
+      const filters = { languages: ['连续建议语种'], genres: [], difficulties: [], ratings: [], performanceTypes: [] };
+      const context = await request('/api/picks/context');
+      if (context.sessionId) await request(`/api/pick-sessions/${context.sessionId}/end`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      let final: any;
+      for (let index = 0; index < 3; index += 1) {
+        await request(`/api/user-songs/${helper.songId}/snooze`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ until: '2099-01-01T00:00:00.000Z' }) });
+        const picked = await request('/api/picks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: crypto.randomUUID(), filters, avoidRecent: false }) });
+        if (picked.song.id !== target.songId) throw new Error('Pick 未按测试筛选选出连续建议目标。');
+        await request(`/api/user-songs/${helper.songId}/snooze`, { method: 'DELETE' });
+        final = await request('/api/picks', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: crypto.randomUUID(), sessionId: picked.sessionId, currentEventId: picked.eventId, filters, avoidRecent: false }) });
+        if (index < 2) await request(`/api/pick-sessions/${picked.sessionId}/end`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      }
+      return { title: target.title ?? `连续建议目标${suffix}`, suggestion: final.skipSuggestion };
+    });
+    expect(sequence.suggestion).toMatchObject({ title: sequence.title });
+    await page.reload();
+    const suggestion = page.getByRole('dialog', { name: '这首歌连续 3 场未唱' });
+    await expect(suggestion).toBeVisible();
+    await suggestion.getByRole('button', { name: '冷藏 30 天' }).click();
+    await expect(page.getByRole('status')).toContainText('已冷藏 30 天');
   });
 });

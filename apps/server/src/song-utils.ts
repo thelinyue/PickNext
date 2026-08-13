@@ -56,17 +56,12 @@ export function normalizedSongIdentity(song: SongIdentityInput): {
 
 /**
  * 相似候选只用于提醒，不直接阻止新增。精确身份由调用方优先判断。
- * 同歌名、同歌手或互相包含时给出稳定分数，避免引入不可解释的模糊算法。
+ * 这里只依据歌名相同或互相包含计算分数；同一歌手本身不能说明是重复歌曲。
  */
 export function similarityScore(left: SongIdentityInput, right: SongIdentityInput): number {
   const lt = normalizeIdentityPart(left.title);
-  const la = normalizeIdentityPart(left.artist);
   const rt = normalizeIdentityPart(right.title);
-  const ra = normalizeIdentityPart(right.artist);
-  let score = 0;
-  if (lt === rt) score += 3;
-  else if (lt.includes(rt) || rt.includes(lt)) score += 1;
-  if (la === ra) score += 3;
-  else if (la.includes(ra) || ra.includes(la)) score += 1;
-  return score;
+  if (lt === rt) return 4;
+  if (lt.includes(rt) || rt.includes(lt)) return 3;
+  return 0;
 }

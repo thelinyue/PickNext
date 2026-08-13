@@ -13,6 +13,8 @@ describe('曲库领域服务', () => {
     const second = service.createSong({ title: '晴天', artist: '周杰伦', version: 'Live', performanceType: 'solo', addedBy: 1 });
     expect(service.findCandidates({ title: ' 晴天 ', artist: '周杰伦', version: null }).exact?.id).toBe(first);
     expect(service.findCandidates({ title: '晴天', artist: '周杰伦', version: 'Live' }).exact?.id).toBe(second);
+    service.createSong({ title: '七里香', artist: '周杰伦', version: null, performanceType: 'solo', addedBy: 1 });
+    expect(service.findCandidates({ title: '稻香', artist: '周杰伦', version: null }).similar).toEqual([]);
     expect(service.collectUserSong(2, first, { collectionType: 'repertoire' })).toBe(true);
     expect(db.prepare('SELECT collection_type FROM user_songs WHERE user_id = 2 AND song_id = ?').get(first)).toMatchObject({ collection_type: 'repertoire' });
     db.close();

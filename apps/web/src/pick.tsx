@@ -24,6 +24,8 @@ export interface PickController {
   ktvExhausted: boolean;
   exhaustedOpen: boolean;
   setExhaustedOpen(open: boolean): void;
+  skipSuggestion: PickResponse['skipSuggestion'];
+  dismissSkipSuggestion(): void;
   emptyMessage: string;
   pick(continueFromRepertoire?: boolean): Promise<void>;
   complete(rating?: number, note?: string, keyShift?: number): Promise<void>;
@@ -47,6 +49,7 @@ export function usePickController(notify: (message: string) => void, enabled = t
   const [exhausted, setExhausted] = useState(false);
   const [ktvExhausted, setKtvExhausted] = useState(false);
   const [exhaustedOpen, setExhaustedOpen] = useState(false);
+  const [skipSuggestion, setSkipSuggestion] = useState<PickResponse['skipSuggestion']>(null);
   const [emptyMessage, setEmptyMessage] = useState('把选择交给算法，下一首会更有新鲜感。');
   const busyRef = useRef(false);
   const pendingPickRef = useRef<PickRequest | null>(null);
@@ -58,6 +61,7 @@ export function usePickController(notify: (message: string) => void, enabled = t
     setFilters(contextQuery.data.filters);
     setAvoidRecent(contextQuery.data.avoidRecent);
     setKtvExhausted(contextQuery.data.ktvExhausted);
+    setSkipSuggestion(contextQuery.data.current?.skipSuggestion ?? null);
     if (contextQuery.data.ktvExhausted) setExhaustedOpen(true);
   }, [contextQuery.data]);
 
@@ -75,12 +79,12 @@ export function usePickController(notify: (message: string) => void, enabled = t
       pendingPickRef.current = null;
       setCurrent(result);
       setSessionId(result.sessionId);
+      setSkipSuggestion(result.skipSuggestion);
       setExhausted(false);
       setKtvExhausted(false);
       setExhaustedOpen(false);
       setEmptyMessage('把选择交给算法，下一首会更有新鲜感。');
       if (request.currentEventId) notify('已跳过上一首，未计为唱完。');
-      if (result.skipSuggestion) notify('上一首已连续 3 场跳过，可以考虑冷藏或移到待学。');
       void client.invalidateQueries({ queryKey: ['pick-context'] });
     } catch (reason) {
       if (reason instanceof ApiError && reason.code === 'NO_CANDIDATES') {
@@ -105,6 +109,7 @@ export function usePickController(notify: (message: string) => void, enabled = t
     try {
       await api(`/api/picks/${completed.eventId}/complete`, { method: 'POST', body: JSON.stringify({ requestId: crypto.randomUUID(), rating, note: note || undefined, keyShift }) });
       saved = true;
+      setSkipSuggestion(null);
       notify('已记为唱完');
       client.setQueryData<{ playlist: unknown; songs: Array<{ id: number }> }>(['next-ktv'], (value) => value ? { ...value, songs: value.songs.filter((song) => song.id !== current.song.id) } : value);
       await Promise.all([
@@ -134,7 +139,7 @@ export function usePickController(notify: (message: string) => void, enabled = t
     try {
       if (sessionId) await api(`/api/pick-sessions/${sessionId}/end`, { method: 'POST', body: '{}' });
       pendingPickRef.current = null;
-      setSessionId(undefined); setCurrent(null); setExhausted(false); setKtvExhausted(false); setExhaustedOpen(false); setEmptyMessage('新一场准备好了。'); notify('本场已结束');
+      setSessionId(undefined); setCurrent(null); setSkipSuggestion(null); setExhausted(false); setKtvExhausted(false); setExhaustedOpen(false); setEmptyMessage('新一场准备好了。'); notify('本场已结束');
       await client.invalidateQueries({ queryKey: ['pick-context'] });
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : '结束本场失败，请重试');
@@ -145,14 +150,17 @@ export function usePickController(notify: (message: string) => void, enabled = t
 
   const refreshContext = useCallback(async () => { await contextQuery.refetch(); }, [contextQuery]);
 
-  return { current, sessionId, context: contextQuery.data, contextError: contextQuery.error, filters, setFilters, avoidRecent, setAvoidRecent, busy, initializing: contextQuery.isLoading, operation, exhausted, ktvExhausted, exhaustedOpen, setExhaustedOpen, emptyMessage, pick, complete, endSession, refreshContext };
+  const dismissSkipSuggestion = useCallback(() => setSkipSuggestion(null), []);
+  return { current, sessionId, context: contextQuery.data, contextError: contextQuery.error, filters, setFilters, avoidRecent, setAvoidRecent, busy, initializing: contextQuery.isLoading, operation, exhausted, ktvExhausted, exhaustedOpen, setExhaustedOpen, skipSuggestion, dismissSkipSuggestion, emptyMessage, pick, complete, endSession, refreshContext };
 }
 
 export function PickPage({ notify, controller, onOpenGlobalLibrary, canAddSongs }: { notify(message: string): void; controller: PickController; onOpenGlobalLibrary(): void; canAddSongs: boolean }) {
-  const { current, sessionId, context, contextError, filters, setFilters, avoidRecent, setAvoidRecent, busy, initializing, operation, exhausted, ktvExhausted, exhaustedOpen, setExhaustedOpen, emptyMessage, pick, complete, endSession, refreshContext } = controller;
+  const client = useQueryClient();
+  const { current, sessionId, context, contextError, filters, setFilters, avoidRecent, setAvoidRecent, busy, initializing, operation, exhausted, ktvExhausted, exhaustedOpen, setExhaustedOpen, skipSuggestion, dismissSkipSuggestion, emptyMessage, pick, complete, endSession, refreshContext } = controller;
   const [filterOpen, setFilterOpen] = useState(false);
   const [completeOpen, setCompleteOpen] = useState(false);
   const [karaokeOpen, setKaraokeOpen] = useState(false);
+  const [skipActionBusy, setSkipActionBusy] = useState<'snooze' | 'learning' | 'keep' | null>(null);
   const lyrics = useQuery({
     queryKey: ['song-detail', current?.song.id],
     queryFn: () => api<PickSongDetail>(`/api/songs/${current!.song.id}`),
@@ -162,6 +170,22 @@ export function PickPage({ notify, controller, onOpenGlobalLibrary, canAddSongs 
   const finish = async (rating?: number, note?: string, keyShift?: number) => { await complete(rating, note, keyShift); setCompleteOpen(false); };
   const requestComplete = () => current?.song.rating ? void finish() : setCompleteOpen(true);
   const preview = useMemo(() => readableLyricLines(lyrics.data?.lyrics ?? '').slice(0, 3), [lyrics.data?.lyrics]);
+  const resolveSkipSuggestion = async (action: 'snooze' | 'learning' | 'keep') => {
+    if (!skipSuggestion || skipActionBusy) return;
+    setSkipActionBusy(action);
+    try {
+      if (action === 'snooze') {
+        await api(`/api/user-songs/${skipSuggestion.songId}/snooze`, { method: 'PUT', body: JSON.stringify({ until: new Date(Date.now() + 30 * 86_400_000).toISOString() }) });
+      } else if (action === 'learning') {
+        await api(`/api/user-songs/${skipSuggestion.songId}/collection`, { method: 'PUT', body: JSON.stringify({ collectionType: 'learning' }) });
+      }
+      dismissSkipSuggestion();
+      await Promise.all([client.invalidateQueries({ queryKey: ['library-search'] }), client.invalidateQueries({ queryKey: ['pick-context'] })]);
+      notify(action === 'snooze' ? '已冷藏 30 天。' : action === 'learning' ? '已移至待学清单。' : '继续保留在会唱曲库。');
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : '跳过建议处理失败，请重试。');
+    } finally { setSkipActionBusy(null); }
+  };
 
   const empty = initializing
     ? <EmptyState title="正在恢复场次" description="正在读取最近一次 Pick 状态。" />
@@ -182,6 +206,7 @@ export function PickPage({ notify, controller, onOpenGlobalLibrary, canAddSongs 
     {sessionId && <button className="text-action" disabled={busy} onClick={endSession}>{operation === 'ending' ? '正在结束…' : '结束本场'} <ChevronRight size={16} /></button>}
     <FilterSheet open={filterOpen} onOpenChange={setFilterOpen} filters={filters} setFilters={setFilters} avoidRecent={avoidRecent} setAvoidRecent={setAvoidRecent} facets={context?.facets ?? { languages: [], genres: [] }} onApply={() => { setFilterOpen(false); if (exhausted) { setExhaustedOpen(false); void pick(); } else notify('筛选将在下一次 Pick 生效'); }} />
     <CompleteSheet open={completeOpen} onOpenChange={setCompleteOpen} onComplete={finish} busy={busy} />
+    <SkipSuggestionSheet suggestion={skipSuggestion} busy={skipActionBusy} onOpenChange={(open) => { if (!open) dismissSkipSuggestion(); }} onAction={(action) => void resolveSkipSuggestion(action)} />
     <Sheet open={exhaustedOpen} onOpenChange={setExhaustedOpen} title={ktvExhausted ? '下一次 KTV 已唱完' : '本场已经唱完'}><div className="sheet-stack"><p className="helper">{ktvExhausted ? '准备的 KTV 歌曲已经全部处理完，可以继续从会唱曲库 Pick，或结束本场。' : '当前条件下没有尚未抽取的歌曲。本场不会重复推荐已经抽取过的歌曲。'}</p>{ktvExhausted ? <Button onClick={() => void pick(true)}><Mic2 size={18} />继续唱会唱曲库</Button> : <Button onClick={() => { setExhaustedOpen(false); setFilterOpen(true); }}><SlidersHorizontal size={18} />调整筛选继续</Button>}<Button className="secondary" loading={operation === 'ending'} onClick={() => void endSession()}><Check size={18} />结束本场</Button></div></Sheet>
     <KaraokeOverlay open={karaokeOpen} song={current ? { id: current.song.id, title: current.song.title, artist: current.song.artist } : null} lyrics={lyrics.data?.lyrics ?? ''} onClose={() => setKaraokeOpen(false)} onComplete={() => { setKaraokeOpen(false); requestComplete(); }} onNext={() => { setKaraokeOpen(false); void pick(); }} notify={notify} />
   </section>;
@@ -259,4 +284,8 @@ function FilterGroup({ title, values, selected, onToggle }: { title: string; val
 function CompleteSheet({ open, onOpenChange, onComplete, busy }: { open: boolean; onOpenChange(open: boolean): void; onComplete(rating: number, note?: string, keyShift?: number): void; busy: boolean }) {
   const [rating, setRating] = useState(4); const [note, setNote] = useState(''); const [keyShift, setKeyShift] = useState(0);
   return <Sheet open={open} onOpenChange={onOpenChange} title="第一次唱完"><div className="sheet-stack"><p className="helper">请选择长期演唱把握，这会帮助以后筛选歌曲。</p><div className="rating" aria-label="长期演唱把握">{[1,2,3,4,5].map((value) => <button key={value} onClick={() => setRating(value)} className={value <= rating ? 'active' : ''}>★</button>)}</div><details className="complete-details"><summary>补充记录（选填）</summary><div className="sheet-stack"><label>个人升降调<select value={keyShift} onChange={(event) => setKeyShift(Number(event.target.value))}>{Array.from({ length: 13 }, (_, index) => index - 6).map((value) => <option key={value} value={value}>{value > 0 ? '+' : ''}{value} Key</option>)}</select></label><label>本次备注<textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="今天高音有点紧……" /></label></div></details><Button loading={busy} onClick={() => onComplete(rating, note, keyShift)}><Check />保存并下一首</Button></div></Sheet>;
+}
+
+export function SkipSuggestionSheet({ suggestion, busy, onOpenChange, onAction }: { suggestion: PickResponse['skipSuggestion']; busy: 'snooze' | 'learning' | 'keep' | null; onOpenChange(open: boolean): void; onAction(action: 'snooze' | 'learning' | 'keep'): void }) {
+  return <Sheet open={Boolean(suggestion)} onOpenChange={onOpenChange} title="这首歌连续 3 场未唱"><div className="sheet-stack"><p className="helper">「{suggestion?.title}」已经连续三个不同场次被跳过，要怎么处理？</p><Button loading={busy === 'snooze'} disabled={Boolean(busy)} onClick={() => onAction('snooze')}>冷藏 30 天</Button><Button className="secondary" loading={busy === 'learning'} disabled={Boolean(busy)} onClick={() => onAction('learning')}>移至待学清单</Button><Button className="ghost" loading={busy === 'keep'} disabled={Boolean(busy)} onClick={() => onAction('keep')}>继续保留</Button></div></Sheet>;
 }

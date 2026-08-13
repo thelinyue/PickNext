@@ -129,7 +129,7 @@ export class PickService {
 
       return {
         sessionId: session?.id ?? null,
-        current: currentRow ? JSON.parse(currentRow.response_json) as PickResponse : null,
+        current: currentRow ? this.parseStoredResponse(currentRow.response_json) : null,
         filters,
         avoidRecent,
         ktvExhausted: Boolean(session && !currentRow && latestEvent?.source === 'ktv' && counts.nextKtv === 0),
@@ -166,7 +166,7 @@ export class PickService {
     const duplicate = this.db
       .prepare('SELECT response_json FROM pick_events WHERE request_id = ? AND user_id = ?')
       .get(input.requestId, userId) as { response_json: string } | undefined;
-    if (duplicate) return JSON.parse(duplicate.response_json) as PickResponse;
+    if (duplicate) return this.parseStoredResponse(duplicate.response_json);
 
     const session = this.resolveSession(userId, input.sessionId);
     const skippedSongId = input.currentEventId
@@ -263,7 +263,7 @@ export class PickService {
       reason,
       recentFilterRelaxed,
       algorithmVersion: PICK_ALGORITHM_VERSION,
-      skipSuggestion: skippedSongId !== null && this.hasThreeSessionSkips(userId, skippedSongId)
+      skipSuggestion: skippedSongId === null ? null : this.getSkipSuggestion(userId, skippedSongId)
     };
     this.db.prepare(`
       INSERT INTO pick_events(
@@ -403,5 +403,22 @@ export class PickService {
     `).all(userId, songId) as Array<{ session_id: string; status: string }>;
     const distinct = rows.filter((row, index) => rows.findIndex((other) => other.session_id === row.session_id) === index);
     return distinct.length >= 3 && distinct.slice(0, 3).every((row) => row.status === 'skipped');
+  }
+
+  /** 兼容 v0.2.0 已保存的布尔跳过建议，旧记录没有足够信息支持操作面板，因此安全降级为无建议。 */
+  private parseStoredResponse(value: string): PickResponse {
+    const response = JSON.parse(value) as PickResponse & { skipSuggestion?: PickResponse['skipSuggestion'] | boolean };
+    return { ...response, skipSuggestion: typeof response.skipSuggestion === 'object' ? response.skipSuggestion : null };
+  }
+
+  /** 只有仍在会唱曲库中的歌曲才提供连续跳过建议，避免全局冷启动歌曲出现无效操作。 */
+  private getSkipSuggestion(userId: number, songId: number): PickResponse['skipSuggestion'] {
+    const song = this.db.prepare(`
+      SELECT s.id AS songId, s.title, s.artist, s.version
+      FROM user_songs us JOIN songs s ON s.id = us.song_id
+      WHERE us.user_id = ? AND us.song_id = ? AND us.collection_type = 'repertoire'
+        AND us.removed_at IS NULL AND s.status = 'active'
+    `).get(userId, songId) as PickResponse['skipSuggestion'] | undefined;
+    return song && this.hasThreeSessionSkips(userId, songId) ? song : null;
   }
 }

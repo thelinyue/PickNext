@@ -145,6 +145,37 @@ describe('核心 API 纵向闭环', () => {
     expect((database.db.prepare(`SELECT count(*) AS count FROM user_songs us JOIN songs s ON s.id = us.song_id WHERE s.title LIKE '批量全局歌曲%'`).get() as any).count).toBe(0);
   });
 
+  it('后台导入支持 CSV 和 JSON，并返回可读的任务结果', async () => {
+    const cookie = await setup();
+    const csv = await app.inject({ method: 'POST', url: '/api/imports', headers: { cookie }, payload: {
+      format: 'csv', content: 'title,artist,version\nCSV歌曲,CSV歌手,现场版', collectionType: 'learning'
+    } });
+    const csvTask = await waitForTask(cookie, csv.json().taskId);
+    expect(csvTask).toMatchObject({ status: 'done' });
+    expect(JSON.parse(csvTask.result)).toMatchObject({ imported: 1, reused: 0 });
+
+    const json = await app.inject({ method: 'POST', url: '/api/imports', headers: { cookie }, payload: {
+      format: 'json', content: JSON.stringify([{ title: 'JSON歌曲', artist: 'JSON歌手' }]), collectionType: 'repertoire'
+    } });
+    const jsonTask = await waitForTask(cookie, json.json().taskId);
+    expect(jsonTask).toMatchObject({ status: 'done' });
+    expect(JSON.parse(jsonTask.result)).toMatchObject({ imported: 1, reused: 0 });
+    expect((database.db.prepare(`SELECT collection_type AS collectionType FROM user_songs us JOIN songs s ON s.id = us.song_id WHERE s.title = 'JSON歌曲'`).get() as any).collectionType).toBe('repertoire');
+
+    const invalid = await app.inject({ method: 'POST', url: '/api/imports', headers: { cookie }, payload: {
+      format: 'csv', content: 'bad,header\n缺少歌手列', collectionType: 'learning'
+    } });
+    const invalidTask = await waitForTask(cookie, invalid.json().taskId);
+    expect(invalidTask).toMatchObject({ status: 'failed', error: 'CSV 必须包含 title 和 artist 列。' });
+
+    const cancellable = await app.inject({ method: 'POST', url: '/api/imports', headers: { cookie }, payload: {
+      format: 'text', content: Array.from({ length: 100 }, (_, index) => `取消歌曲${index} - 取消歌手` ).join('\n'), collectionType: 'learning'
+    } });
+    const cancel = await app.inject({ method: 'POST', url: `/api/tasks/${cancellable.json().taskId}/cancel`, headers: { cookie }, payload: {} });
+    expect(cancel.json()).toMatchObject({ ok: true, cancelled: true });
+    expect((await waitForTask(cookie, cancellable.json().taskId)).status).toBe('cancelled');
+  });
+
   it('Pick 上下文可以恢复当前歌曲、筛选、数量和个人筛选项', async () => {
     const cookie = await setup();
     const empty = await app.inject({ method: 'GET', url: '/api/picks/context', headers: { cookie } });
@@ -226,6 +257,34 @@ describe('核心 API 纵向闭环', () => {
     const history = await app.inject({ method: 'GET', url: '/api/history', headers: { cookie } });
     expect(history.json().items).toEqual([expect.objectContaining({ title: '最后一首', status: 'skipped' })]);
     expect((database.db.prepare('SELECT count(*) AS count FROM plays').get() as any).count).toBe(0);
+  });
+
+  it('会唱歌曲连续三个场次被跳过后返回可执行建议', async () => {
+    const cookie = await setup();
+    const target = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie }, payload: { title: '连续跳过目标', artist: '歌手甲', collectionType: 'repertoire' } });
+    const helper = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie }, payload: { title: '连续跳过辅助', artist: '歌手乙', collectionType: 'repertoire' } });
+    const targetId = target.json().songId;
+    const helperId = helper.json().songId;
+    const userId = (database.db.prepare("SELECT id FROM users WHERE username = 'singer'").get() as { id: number }).id;
+    const snoozeHelper = (until: string | null) => database.db.prepare(`
+      INSERT INTO song_user_meta(user_id, song_id, pick_snoozed_until) VALUES (?, ?, ?)
+      ON CONFLICT(user_id, song_id) DO UPDATE SET pick_snoozed_until = excluded.pick_snoozed_until
+    `).run(userId, helperId, until);
+
+    let final: any;
+    for (let index = 0; index < 3; index += 1) {
+      snoozeHelper('2099-01-01 00:00:00');
+      const picked = await app.inject({ method: 'POST', url: '/api/picks', headers: { cookie }, payload: { requestId: crypto.randomUUID() } });
+      expect(picked.json().song.id).toBe(targetId);
+      snoozeHelper(null);
+      const next = await app.inject({ method: 'POST', url: '/api/picks', headers: { cookie }, payload: {
+        requestId: crypto.randomUUID(), sessionId: picked.json().sessionId, currentEventId: picked.json().eventId
+      } });
+      expect(next.statusCode).toBe(200);
+      final = next.json();
+      if (index < 2) await app.inject({ method: 'POST', url: `/api/pick-sessions/${picked.json().sessionId}/end`, headers: { cookie }, payload: {} });
+    }
+    expect(final.skipSuggestion).toMatchObject({ songId: targetId, title: '连续跳过目标', artist: '歌手甲' });
   });
 
   it('曲库搜索按数据范围隔离，并只在三人评分后返回匿名聚合', async () => {

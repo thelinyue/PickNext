@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowDown, ArrowUp, Download, FolderHeart, History, LogOut, Plus, Save, ShieldCheck, Trash2, Upload, Users, X } from 'lucide-react';
-import type { HistoryItem, HistorySummary, PersonalSongListItem, SearchSongsResponse } from '@picknext/shared';
+import { ArrowDown, ArrowUp, CalendarDays, Download, FolderHeart, History, LogOut, Mic2, Music2, Plus, Save, ShieldCheck, Trash2, Upload, Users, X } from 'lucide-react';
+import type { HistoryItem, HistorySummary, ImportTask, PersonalSongListItem, SearchSongsResponse } from '@picknext/shared';
 import { api } from './api.js';
 import { BasicSongCard, Button, EmptyState, IconButton, PageHeader, Sheet, SongCard } from './components.js';
 
@@ -18,7 +18,7 @@ export function MePage({ user, onLogout, onManageUsers, notify }: { user: Curren
   const client = useQueryClient();
   const [historyOpen, setHistoryOpen] = useState(false); const [playlistOpen, setPlaylistOpen] = useState(false);
   const [selectedPlaylist, setSelectedPlaylist] = useState<PlaylistSummary | null>(null); const [importOpen, setImportOpen] = useState(false);
-  const [reviewsOpen, setReviewsOpen] = useState(false);
+  const [reviewsOpen, setReviewsOpen] = useState(false); const [exportConfirmOpen, setExportConfirmOpen] = useState(false);
   const history = useQuery({ queryKey: ['history-summary'], queryFn: () => api<{ summary: HistorySummary }> (`/api/history?limit=1&timezoneOffset=${new Date().getTimezoneOffset()}`) });
   const playlists = useQuery({ queryKey: ['playlists'], queryFn: () => api<{ playlists: PlaylistSummary[] }>('/api/playlists') });
   const canReview = user.role === 'admin' || user.isMaintainer;
@@ -26,12 +26,15 @@ export function MePage({ user, onLogout, onManageUsers, notify }: { user: Curren
   const userSummary = useQuery({ queryKey: ['admin-users-summary'], enabled: user.role === 'admin', queryFn: () => api<{ summary: { total: number; maintainers: number } }>('/api/admin/users?limit=1') });
   const logout = async () => { await api('/api/auth/logout', { method: 'POST', body: '{}' }); onLogout(); };
   const exportData = async () => {
-    const data = await api<object>('/api/export'); const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `picknext-${new Date().toISOString().slice(0, 10)}.json`; link.click(); URL.revokeObjectURL(link.href);
+    try {
+      const data = await api<object>('/api/export'); const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `picknext-${new Date().toISOString().slice(0, 10)}.json`; link.click(); URL.revokeObjectURL(link.href);
+      notify('数据已导出，请妥善保管文件。');
+    } catch (reason) { notify(reason instanceof Error ? reason.message : '导出失败，请稍后重试。'); }
   };
   return <section className="page me-page"><PageHeader eyebrow="个人空间" title={user.username} />
-    <div className="me-quick-grid"><button onClick={() => setHistoryOpen(true)}><History /><strong>{history.data?.summary.playedToday ?? 0}</strong><span>今日唱</span></button><button onClick={() => setHistoryOpen(true)}><History /><strong>{history.data?.summary.playedTotal ?? 0}</strong><span>累计唱</span></button><button onClick={() => setHistoryOpen(true)}><History /><strong>{history.data?.summary.favoriteArtist ?? '—'}</strong><span>常唱歌手</span></button></div>
-    <div className="profile-actions"><Button className="secondary" onClick={() => setImportOpen(true)}><Upload size={18} />批量收歌</Button><Button className="secondary" onClick={exportData}><Download size={18} />导出数据</Button></div>
+    <div className="me-quick-grid"><button onClick={() => setHistoryOpen(true)}><CalendarDays /><strong>{history.data?.summary.playedToday ?? 0}</strong><span>今日唱</span></button><button onClick={() => setHistoryOpen(true)}><Music2 /><strong>{history.data?.summary.playedTotal ?? 0}</strong><span>累计唱</span></button><button onClick={() => setHistoryOpen(true)}><Mic2 /><strong>{history.data?.summary.favoriteArtist ?? '—'}</strong><span>常唱歌手</span></button></div>
+    <div className="profile-actions"><Button className="secondary" onClick={() => setImportOpen(true)}><Upload size={18} />批量收歌</Button><Button className="secondary" onClick={() => setExportConfirmOpen(true)}><Download size={18} />导出数据</Button></div>
     {canReview && <button className="admin-entry" onClick={() => setReviewsOpen(true)}><span><ShieldCheck /></span><div><strong>审核中心</strong><small>处理重复歌曲 · 保护全局曲库</small></div><b>{reviewCount.data?.count ?? 0} 待处理 ›</b></button>}
     {user.role === 'admin' && <button className="admin-entry" onClick={onManageUsers}><span><Users /></span><div><strong>用户与权限</strong><small>{userSummary.data ? `${userSummary.data.summary.total} 位用户 · ${userSummary.data.summary.maintainers} 位曲库管家` : '搜索、批量授权与永久删除'}</small></div><b>管理 ›</b></button>}
     <div className="section-heading"><h2 className="section-title">我的歌单</h2><button onClick={() => setPlaylistOpen(true)}><Plus size={16} />新建</button></div>
@@ -41,6 +44,7 @@ export function MePage({ user, onLogout, onManageUsers, notify }: { user: Curren
     <button className="logout" onClick={logout}><LogOut size={18} />退出登录</button>
     <HistorySheet open={historyOpen} onOpenChange={setHistoryOpen} />
     <ImportSheet open={importOpen} onOpenChange={setImportOpen} notify={notify} />
+    <Sheet open={exportConfirmOpen} onOpenChange={setExportConfirmOpen} title="确认导出数据"><div className="sheet-stack"><p className="helper">将下载你的个人曲库、歌单、点歌历史和演唱记录。导出文件包含个人数据，请妥善保管。</p><Button onClick={() => { setExportConfirmOpen(false); void exportData(); }}><Download size={18} />确认导出</Button><Button className="secondary" onClick={() => setExportConfirmOpen(false)}>取消</Button></div></Sheet>
     <CreatePlaylistSheet open={playlistOpen} onOpenChange={setPlaylistOpen} notify={notify} onCreated={async () => { await client.invalidateQueries({ queryKey: ['playlists'] }); }} />
     <PlaylistSheet playlist={selectedPlaylist} onClose={() => setSelectedPlaylist(null)} notify={notify} />
     <ReviewCenter open={reviewsOpen} onOpenChange={setReviewsOpen} notify={notify} />
@@ -55,7 +59,7 @@ function HistorySheet({ open, onOpenChange }: { open: boolean; onOpenChange(open
     for (const item of history.data?.items ?? []) { const date = parseHistoryTime(item.occurredAt).toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'short' }); result.set(date, [...(result.get(date) ?? []), item]); }
     return [...result.entries()];
   }, [history.data]);
-  return <Sheet open={open} onOpenChange={onOpenChange} title="点歌历史"><div className="history-stats"><div><strong>{history.data?.summary.playedTotal ?? 0}</strong><span>累计已唱</span></div><div><strong>{history.data?.summary.playedToday ?? 0}</strong><span>今天</span></div><div><strong>{history.data?.summary.favoriteArtist ?? '—'}</strong><span>常唱歌手</span></div></div><div className="scene-chips">{([['all','全部'],['week','本周'],['played','已唱']] as const).map(([value,label]) => <button className={period === value ? 'active' : ''} key={value} onClick={() => setPeriod(value)}>{label}</button>)}</div><div className="history-groups">{groups.map(([date, items], index) => <details key={date} open={index === 0}><summary><span>{date}</span><small>抽取 {items.length} 首 · 唱了 {items.filter((item) => item.status === 'played').length} 首</small></summary>{items.map((item) => <BasicSongCard key={item.id} song={{ id: item.songId, title: item.title, artist: item.artist, version: item.version, rating: item.rating }} action={<div className={`history-status ${item.status}`}>{item.status === 'played' ? '已唱' : '未唱'}{item.note && <small>{item.note}</small>}</div>} />)}</details>)}</div>{!history.isLoading && !groups.length && <EmptyState title="还没有点歌记录" description="从 Pick 开始唱第一首吧。" />}</Sheet>;
+  return <Sheet open={open} onOpenChange={onOpenChange} title="点歌历史"><div className="history-stats"><div><strong>{history.data?.summary.playedTotal ?? 0}</strong><span>累计已唱</span></div><div><strong>{history.data?.summary.playedToday ?? 0}</strong><span>今天</span></div><div><strong>{history.data?.summary.favoriteArtist ?? '—'}</strong><span>常唱歌手</span></div></div><div className="scene-chips">{([['all','全部'],['week','本周'],['played','已唱']] as const).map(([value,label]) => <button className={period === value ? 'active' : ''} key={value} onClick={() => setPeriod(value)}>{label}</button>)}</div><div className="history-groups">{groups.map(([date, items]) => <details key={date}><summary><span>{date}</span><small>抽取 {items.length} 首 · 唱了 {items.filter((item) => item.status === 'played').length} 首</small></summary>{items.map((item) => <BasicSongCard key={item.id} song={{ id: item.songId, title: item.title, artist: item.artist, version: item.version, rating: item.rating }} action={<div className={`history-status ${item.status}`}>{item.status === 'played' ? '已唱' : '未唱'}{item.note && <small>{item.note}</small>}</div>} />)}</details>)}</div>{!history.isLoading && !groups.length && <EmptyState title="还没有点歌记录" description="从 Pick 开始唱第一首吧。" />}</Sheet>;
 }
 
 function CreatePlaylistSheet({ open, onOpenChange, onCreated, notify }: { open: boolean; onOpenChange(open: boolean): void; onCreated(): Promise<void>; notify(message: string): void }) {
@@ -85,16 +89,72 @@ function ReviewCenter({ open, onOpenChange, notify }: { open: boolean; onOpenCha
   return <Sheet open={open} onOpenChange={onOpenChange} title="审核中心"><div className="review-list">{reviews.data?.reviews.map((review) => <article className="review-card" key={review.id}><header><strong>「{review.submitted.title}」重复提交</strong><span>{review.submitter}</span></header><div className="review-compare"><div><b>用户提交</b><span>{review.submitted.title}</span><span>{review.submitted.artist}</span><span>{review.submitted.version || '原版'}</span><span>{review.submitted.language || '语种未填'} · {review.submitted.genre || '曲风未填'}</span></div><div><b>曲库已有</b><span>{review.matched?.title}</span><span>{review.matched?.artist}</span><span>{review.matched?.version || '原版'}</span><span>{review.matched?.language || '语种未填'} · {review.matched?.genre || '曲风未填'}</span></div></div>{approving?.id === review.id ? <div className="approve-form"><label>独立版本名称<input value={version} onChange={(event) => setVersion(event.target.value)} placeholder="例如：Live 2025" /></label><div><Button className="secondary" onClick={() => setApproving(null)}>取消</Button><Button disabled={!version.trim()} loading={decide.isPending} onClick={() => decide.mutate({ id: review.id, action: 'approve', body: { ...review.submitted, version } })}>批准独立版本</Button></div></div> : <div className="review-actions"><Button className="secondary" loading={decide.isPending} onClick={() => decide.mutate({ id: review.id, action: 'reject' })}>拒绝</Button><Button className="secondary" onClick={() => { setApproving(review); setVersion(review.submitted.version ?? ''); }}>独立版本</Button><Button loading={decide.isPending} onClick={() => decide.mutate({ id: review.id, action: 'merge' })}>合并复用</Button></div>}</article>)}{!reviews.isLoading && !reviews.data?.reviews.length && <EmptyState title="没有待审核提交" description="重复歌曲处理完成后会从这里移除。" />}</div></Sheet>;
 }
 
-function ImportSheet({ open, onOpenChange, notify }: { open: boolean; onOpenChange(open: boolean): void; notify(message: string): void }) {
-  const [content, setContent] = useState(''); const [busy, setBusy] = useState(false);
+export function ImportSheet({ open, onOpenChange, notify }: { open: boolean; onOpenChange(open: boolean): void; notify(message: string): void }) {
+  const client = useQueryClient();
+  const [content, setContent] = useState(''); const [busy, setBusy] = useState(false); const [format, setFormat] = useState<'text' | 'csv' | 'json'>('text');
+  const [fileName, setFileName] = useState(''); const [taskId, setTaskId] = useState<string | null>(null);
   const [collectionType, setCollectionType] = useState<'learning' | 'repertoire' | null>('learning');
+  const notifiedTask = useRef<string | null>(null);
+  const task = useQuery({
+    queryKey: ['import-task', taskId],
+    enabled: Boolean(taskId),
+    queryFn: () => api<ImportTask>(`/api/tasks/${taskId}`),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status && ['done', 'failed', 'cancelled'].includes(status) ? false : 700;
+    }
+  });
+  const running = task.data?.status === 'pending' || task.data?.status === 'running';
+  const result = useMemo(() => {
+    if (!task.data?.result) return null;
+    try { return JSON.parse(task.data.result) as { imported?: number; reused?: number; needsConfirmation?: unknown[] }; }
+    catch { return null; }
+  }, [task.data?.result]);
+
+  useEffect(() => {
+    if (!task.data || notifiedTask.current === task.data.id) return;
+    if (task.data.status === 'done') {
+      notifiedTask.current = task.data.id;
+      void client.invalidateQueries({ queryKey: ['library-search'] });
+      notify(`导入完成：新增 ${result?.imported ?? 0} 首，复用 ${result?.reused ?? 0} 首${result?.needsConfirmation?.length ? `，${result.needsConfirmation.length} 首待审核` : ''}。`);
+    } else if (task.data.status === 'failed') {
+      notifiedTask.current = task.data.id;
+      notify(task.data.error ?? '导入失败，请检查文件内容后重试。');
+    } else if (task.data.status === 'cancelled') {
+      notifiedTask.current = task.data.id;
+      notify('导入任务已取消。');
+    }
+  }, [client, notify, result, task.data]);
+
+  const chooseFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const extension = file.name.toLowerCase().split('.').pop();
+    const detected = extension === 'json' ? 'json' : extension === 'csv' ? 'csv' : 'text';
+    setFormat(detected); setFileName(file.name); setContent(await file.text()); setTaskId(null); event.target.value = '';
+  };
   const submit = async () => {
+    if (!content.trim()) return;
     setBusy(true);
     try {
-      const task = await api<{ taskId: string }>('/api/imports', { method: 'POST', body: JSON.stringify({ format: 'text', content, collectionType }) });
-      setContent(''); onOpenChange(false); notify(`导入任务已创建：${task.taskId.slice(0, 8)}`);
+      const created = await api<{ taskId: string }>('/api/imports', { method: 'POST', body: JSON.stringify({ format, content, collectionType }) });
+      setTaskId(created.taskId); notifiedTask.current = null; notify('导入任务已创建，正在处理。');
     } catch (reason) { notify(reason instanceof Error ? reason.message : '导入失败'); }
     finally { setBusy(false); }
   };
-  return <Sheet open={open} onOpenChange={onOpenChange} title="批量粘贴收歌"><div className="sheet-stack"><p className="helper">每行一首，格式为“歌名 - 歌手”。默认进入待学清单。</p><label>个人归属<select value={collectionType ?? ''} onChange={(event) => setCollectionType((event.target.value || null) as 'learning' | 'repertoire' | null)}><option value="learning">待学清单</option><option value="repertoire">会唱曲库</option><option value="">仅维护全局资料，不收录到我的个人曲库</option></select></label><p className="helper">不收录时歌曲仍会进入全部曲库，但不会影响你的个人曲库和 Pick。</p><textarea className="import-area" value={content} onChange={(event) => setContent(event.target.value)} placeholder={'晴天 - 周杰伦\n富士山下 - 陈奕迅'} /><Button disabled={!content.trim()} loading={busy} onClick={submit}>开始导入</Button></div></Sheet>;
+  const cancel = async () => {
+    if (!taskId || !running) return;
+    try { await api(`/api/tasks/${taskId}/cancel`, { method: 'POST', body: '{}' }); await task.refetch(); }
+    catch (reason) { notify(reason instanceof Error ? reason.message : '取消导入失败，请重试。'); }
+  };
+  return <Sheet open={open} onOpenChange={onOpenChange} title="批量收歌"><div className="sheet-stack">
+    <p className="helper">支持逐行粘贴，也可以选择 TXT、CSV 或 JSON 文件。CSV 需要包含 title、artist 列。</p>
+    <label>选择文件<input type="file" accept=".txt,.csv,.json,text/plain,text/csv,application/json" onChange={(event) => void chooseFile(event)} /></label>
+    {fileName && <p className="helper">已选择：{fileName}</p>}
+    <label>导入格式<select value={format} onChange={(event) => setFormat(event.target.value as 'text' | 'csv' | 'json')}><option value="text">文本：歌名 - 歌手</option><option value="csv">CSV：title,artist,version</option><option value="json">JSON：歌曲对象数组</option></select></label>
+    <label>个人归属<select value={collectionType ?? ''} onChange={(event) => setCollectionType((event.target.value || null) as 'learning' | 'repertoire' | null)}><option value="learning">待学清单</option><option value="repertoire">会唱曲库</option><option value="">仅维护全局资料，不收录到我的个人曲库</option></select></label>
+    <textarea className="import-area" value={content} onChange={(event) => setContent(event.target.value)} placeholder={'晴天 - 周杰伦\n富士山下 - 陈奕迅'} />
+    {task.data && <div className={`import-task-status ${task.data.status}`} role="status"><strong>{task.data.status === 'pending' ? '等待处理' : task.data.status === 'running' ? '正在导入' : task.data.status === 'done' ? '导入完成' : task.data.status === 'cancelled' ? '已取消' : '导入失败'}</strong>{task.data.error && <span>{task.data.error}</span>}{result && <span>新增 {result.imported ?? 0} 首 · 复用 {result.reused ?? 0} 首{result.needsConfirmation?.length ? ` · 待审核 ${result.needsConfirmation.length} 首` : ''}</span>}</div>}
+    <div className="import-actions"><Button disabled={!content.trim() || running} loading={busy} onClick={() => void submit()}>开始导入</Button>{running && <Button className="secondary" onClick={() => void cancel()}>取消任务</Button>}</div>
+  </div></Sheet>;
 }

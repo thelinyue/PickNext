@@ -2,7 +2,9 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppShell, Button, EmptyState, NetworkBanner, Sheet, SongCard } from './components.js';
-import { FirstUseGuide } from './pick.js';
+import { FirstUseGuide, SkipSuggestionSheet } from './pick.js';
+import { parseSharedSong } from './App.js';
+import { ImportSheet } from './me.js';
 import { AdminUsersPage } from './admin-users.js';
 import { AuthScreen } from './auth.js';
 
@@ -110,5 +112,34 @@ describe('基础界面组件', () => {
     fireEvent.click(screen.getByRole('button', { name: '没有账号？立即注册' }));
     expect(screen.getByRole('heading', { name: '注册账号' })).not.toBeNull();
     expect(screen.getByRole('button', { name: '注册并登录' })).not.toBeNull();
+  });
+
+  it('分享内容转换为可编辑的收歌预填值', () => {
+    expect(parseSharedSong(new URLSearchParams({ text: '晴天 - 周杰伦 - Live' }))).toEqual({ title: '晴天', artist: '周杰伦', version: 'Live' });
+    expect(parseSharedSong(new URLSearchParams({ title: '富士山下', text: '陈奕迅' }))).toEqual({ title: '富士山下', artist: '陈奕迅' });
+    expect(parseSharedSong(new URLSearchParams())).toBeNull();
+  });
+
+  it('连续跳过建议提供三个可执行处理动作', () => {
+    const action = vi.fn();
+    render(<SkipSuggestionSheet suggestion={{ songId: 7, title: '晴天', artist: '周杰伦', version: null }} busy={null} onOpenChange={vi.fn()} onAction={action} />);
+    expect(screen.getByText(/晴天.*连续三个不同场次被跳过/)).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '冷藏 30 天' }));
+    fireEvent.click(screen.getByRole('button', { name: '移至待学清单' }));
+    fireEvent.click(screen.getByRole('button', { name: '继续保留' }));
+    expect(action.mock.calls.map(([value]) => value)).toEqual(['snooze', 'learning', 'keep']);
+  });
+
+  it('批量导入展示异步任务完成结果', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes('/api/imports')) return new Response(JSON.stringify({ taskId: '00000000-0000-0000-0000-000000000001' }), { status: 202, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ id: '00000000-0000-0000-0000-000000000001', type: 'song_import', status: 'done', result: JSON.stringify({ imported: 1, reused: 2, needsConfirmation: [] }), error: null, createdAt: '2026-08-13 18:00:00', updatedAt: '2026-08-13 18:00:01' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><ImportSheet open onOpenChange={vi.fn()} notify={vi.fn()} /></QueryClientProvider>);
+    fireEvent.change(document.querySelector('textarea.import-area')!, { target: { value: '晴天 - 周杰伦' } });
+    fireEvent.click(screen.getByRole('button', { name: '开始导入' }));
+    expect(await screen.findByText('导入完成')).not.toBeNull();
+    expect(screen.getByText('新增 1 首 · 复用 2 首')).not.toBeNull();
   });
 });
