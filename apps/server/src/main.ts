@@ -12,8 +12,8 @@ mkdirSync(dirname(databasePath), { recursive: true });
 const database = new AppDatabase(databasePath, resolve(projectRoot, 'migrations'));
 const app = await buildApp(
   process.env.NODE_ENV === 'development'
-    ? { db: database.db, devWebRoot: resolve(projectRoot, 'apps/web') }
-    : { db: database.db, webRoot: resolve(projectRoot, 'apps/web/dist') }
+    ? { db: database.db, dataRoot: dirname(databasePath), devWebRoot: resolve(projectRoot, 'apps/web') }
+    : { db: database.db, dataRoot: dirname(databasePath), webRoot: resolve(projectRoot, 'apps/web/dist') }
 );
 
 const shutdown = async () => {

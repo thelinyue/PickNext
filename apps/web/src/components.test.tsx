@@ -99,7 +99,7 @@ describe('基础界面组件', () => {
     render(<QueryClientProvider client={client}><AdminUsersPage onBack={vi.fn()} notify={vi.fn()} /></QueryClientProvider>);
     expect(await screen.findByText('linyue')).not.toBeNull();
     expect(screen.getByLabelText('允许普通用户注册')).not.toBeNull();
-    expect(screen.getByText('12 首个人歌曲 · 可添加歌曲')).not.toBeNull();
+    expect(screen.getByText(/12 首个人歌曲 · 可添加歌曲/)).not.toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '选择' }));
     fireEvent.click(screen.getByRole('button', { name: '选择linyue' }));
     expect(screen.getByText('已选 1/50')).not.toBeNull();

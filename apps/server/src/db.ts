@@ -112,12 +112,20 @@ export class AppDatabase {
     const applied = new Set(
       this.db.prepare('SELECT filename FROM schema_migrations').all().map((row: any) => row.filename as string)
     );
-    const apply = this.db.transaction((filename: string, sql: string) => {
-      this.db.exec(sql);
-      this.db.prepare('INSERT INTO schema_migrations(filename) VALUES (?)').run(filename);
-    });
     for (const filename of readdirSync(directory).filter((name) => name.endsWith('.sql')).sort()) {
-      if (!applied.has(filename)) apply(filename, readFileSync(join(directory, filename), 'utf8'));
+      if (applied.has(filename)) continue;
+      const sql = readFileSync(join(directory, filename), 'utf8');
+      // 0009 需要重建带 CHECK 约束的 MTW 批次表，必须在事务开始前临时关闭外键检查。
+      const rebuildsForeignKeyParent = filename === '0009_admin_console.sql';
+      if (rebuildsForeignKeyParent) this.db.pragma('foreign_keys = OFF');
+      try {
+        this.db.transaction(() => {
+          this.db.exec(sql);
+          this.db.prepare('INSERT INTO schema_migrations(filename) VALUES (?)').run(filename);
+        })();
+      } finally {
+        if (rebuildsForeignKeyParent) this.db.pragma('foreign_keys = ON');
+      }
     }
   }
 

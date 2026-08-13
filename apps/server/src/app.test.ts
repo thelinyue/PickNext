@@ -597,4 +597,63 @@ describe('核心 API 纵向闭环', () => {
     ]);
     expect((database.db.prepare("SELECT count(*) AS count FROM pick_queue_items WHERE status = 'pending'").get() as any).count).toBe(0);
   });
+
+  it('歌曲专辑名贯通详情、搜索和删除申请审核恢复', async () => {
+    const adminCookie = await setup();
+    const createdUser = await app.inject({ method: 'POST', url: '/api/admin/users', headers: { cookie: adminCookie }, payload: { username: 'catalog-owner', password: 'password123' } });
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'catalog-owner', password: 'password123' } });
+    const header = login.headers['set-cookie'];
+    const ownerCookie = (Array.isArray(header) ? header[0] : header)!.split(';')[0]!;
+    const created = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie: ownerCookie }, payload: { title: '专辑歌曲', artist: '测试歌手', album: '测试专辑', collectionType: null } });
+    const songId = created.json().songId;
+    expect((await app.inject({ method: 'GET', url: `/api/songs/${songId}`, headers: { cookie: ownerCookie } })).json()).toMatchObject({ album: '测试专辑' });
+    expect((await app.inject({ method: 'GET', url: '/api/search?scope=global&q=测试专辑', headers: { cookie: adminCookie } })).json().songs[0]).toMatchObject({ id: songId, album: '测试专辑' });
+    const deletion = await app.inject({ method: 'POST', url: `/api/songs/${songId}/deletion-requests`, headers: { cookie: ownerCookie }, payload: {} });
+    expect(deletion.statusCode).toBe(202);
+    const requestId = deletion.json().requestId;
+    expect((await app.inject({ method: 'POST', url: `/api/reviews/deletion-requests/${requestId}/approve`, headers: { cookie: adminCookie }, payload: {} })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: `/api/songs/${songId}`, headers: { cookie: adminCookie } })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'POST', url: `/api/songs/${songId}/restore`, headers: { cookie: adminCookie }, payload: {} })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: `/api/songs/${songId}`, headers: { cookie: adminCookie } })).json()).toMatchObject({ album: '测试专辑' });
+    expect(createdUser.json().userId).toBeGreaterThan(0);
+  });
+
+  it('管理后台对 MTW 候选分页并支持异步批量导入恢复', async () => {
+    const adminCookie = await setup();
+    const adminId = (database.db.prepare("SELECT id FROM users WHERE username = 'singer'").get() as { id: number }).id;
+    const batchId = '11111111-1111-4111-8111-111111111111';
+    database.db.prepare("INSERT INTO mtw_batches(id, created_by, status, progress) VALUES (?, ?, 'ready', ?)").run(batchId, adminId, JSON.stringify({ phase: 'completed', completed: 3, total: 3, message: '扫描完成' }));
+    const insert = database.db.prepare("INSERT INTO mtw_batch_items(batch_id, title, artist, album, action, cover_status) VALUES (?, ?, ?, ?, 'candidate', 'missing')");
+    insert.run(batchId, '后台歌曲一', '后台歌手', '后台专辑'); insert.run(batchId, '后台歌曲二', '后台歌手', '后台专辑'); insert.run(batchId, '另一首歌', '另一歌手', '另一专辑');
+
+    const page = await app.inject({ method: 'GET', url: `/api/admin/mtw/scans/${batchId}/items?page=1&pageSize=2`, headers: { cookie: adminCookie } });
+    expect(page.statusCode).toBe(200);
+    expect(page.json()).toMatchObject({ total: 3, hasMore: true, items: [{ title: '后台歌曲一' }, { title: '后台歌曲二' }] });
+    const filtered = await app.inject({ method: 'GET', url: `/api/admin/mtw/scans/${batchId}/items?q=另一首`, headers: { cookie: adminCookie } });
+    expect(filtered.json().total).toBe(1);
+
+    const started = await app.inject({ method: 'POST', url: `/api/admin/mtw/import-batches/${batchId}/import`, headers: { cookie: adminCookie }, payload: { itemIds: [1, 2] } });
+    expect(started.statusCode).toBe(202);
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const state = database.db.prepare('SELECT status FROM mtw_batches WHERE id = ?').get(batchId) as { status: string };
+      if (state.status === 'ready' || state.status === 'done' || state.status === 'partial_failed') break;
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    expect((database.db.prepare("SELECT count(*) AS count FROM songs WHERE title LIKE '后台歌曲%'").get() as { count: number }).count).toBe(2);
+    expect((await app.inject({ method: 'GET', url: '/api/admin/overview', headers: { cookie: adminCookie } })).statusCode).toBe(200);
+  });
+
+  it('supports user profile nickname and avatar lifecycle', async () => {
+    const cookie = await setup();
+    const png = 'data:image/png;base64,iVBORw0KGgo=';
+    const updated = await app.inject({ method: 'PATCH', url: '/api/auth/profile', headers: { cookie }, payload: { nickname: '歌手昵称', avatar: png } });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json().user).toMatchObject({ username: 'singer', nickname: '歌手昵称', displayName: '歌手昵称', avatarUrl: expect.stringContaining('/api/auth/avatar') });
+    const avatar = await app.inject({ method: 'GET', url: '/api/auth/avatar', headers: { cookie } });
+    expect(avatar.statusCode).toBe(200);
+    expect(avatar.headers['content-type']).toContain('image/png');
+    const cleared = await app.inject({ method: 'PATCH', url: '/api/auth/profile', headers: { cookie }, payload: { nickname: null, avatar: null } });
+    expect(cleared.json().user).toMatchObject({ username: 'singer', nickname: null, displayName: 'singer', avatarUrl: null });
+    expect((await app.inject({ method: 'GET', url: '/api/auth/avatar', headers: { cookie } })).statusCode).toBe(404);
+  });
 });

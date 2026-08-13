@@ -14,6 +14,8 @@ interface CandidateRow {
   title: string;
   artist: string;
   version: string | null;
+  album: string | null;
+  has_cover: number;
   language: string | null;
   genre: string | null;
   difficulty: 'easy' | 'medium' | 'hard' | null;
@@ -252,6 +254,8 @@ export class PickService {
         title: next.title,
         artist: next.artist,
         version: next.version,
+        album: next.album,
+        coverUrl: next.has_cover ? `/api/songs/${next.id}/cover` : null,
         language: next.language,
         genre: next.genre,
         difficulty: next.difficulty,
@@ -325,7 +329,8 @@ export class PickService {
 
   private loadPools(userId: number, sessionId: string) {
     const common = `
-      SELECT s.id, s.title, s.artist, s.version, s.language, s.genre,
+      SELECT s.id, s.title, s.artist, s.version, s.album, s.language, s.genre,
+             EXISTS(SELECT 1 FROM song_covers sc WHERE sc.song_id = s.id) AS has_cover,
              coalesce(m.override_diff, s.difficulty) AS difficulty,
              s.performance_type, m.rating, m.key_shift,
              (SELECT max(p.played_at) FROM plays p WHERE p.user_id = @userId AND p.song_id = s.id) AS last_played_at
@@ -368,7 +373,8 @@ export class PickService {
 
   private nextQueuedSong(sessionId: string, filterHash: string): QueueRow | undefined {
     return this.db.prepare(`
-      SELECT qi.id AS queue_item_id, qi.source, s.id, s.title, s.artist, s.version, s.language,
+      SELECT qi.id AS queue_item_id, qi.source, s.id, s.title, s.artist, s.version, s.album,
+             EXISTS(SELECT 1 FROM song_covers sc WHERE sc.song_id = s.id) AS has_cover, s.language,
              s.genre, coalesce(m.override_diff, s.difficulty) AS difficulty, s.performance_type,
              m.rating, m.key_shift,
              (SELECT max(p.played_at) FROM plays p WHERE p.user_id = session.user_id AND p.song_id = s.id) AS last_played_at
@@ -414,11 +420,12 @@ export class PickService {
   /** 只有仍在会唱曲库中的歌曲才提供连续跳过建议，避免全局冷启动歌曲出现无效操作。 */
   private getSkipSuggestion(userId: number, songId: number): PickResponse['skipSuggestion'] {
     const song = this.db.prepare(`
-      SELECT s.id AS songId, s.title, s.artist, s.version
+      SELECT s.id AS songId, s.title, s.artist, s.version, s.album,
+             EXISTS(SELECT 1 FROM song_covers sc WHERE sc.song_id = s.id) AS hasCover
       FROM user_songs us JOIN songs s ON s.id = us.song_id
       WHERE us.user_id = ? AND us.song_id = ? AND us.collection_type = 'repertoire'
         AND us.removed_at IS NULL AND s.status = 'active'
-    `).get(userId, songId) as PickResponse['skipSuggestion'] | undefined;
-    return song && this.hasThreeSessionSkips(userId, songId) ? song : null;
+    `).get(userId, songId) as (NonNullable<PickResponse['skipSuggestion']> & { hasCover: number }) | undefined;
+    return song && this.hasThreeSessionSkips(userId, songId) ? { ...song, coverUrl: song.hasCover ? `/api/songs/${song.songId}/cover` : null } : null;
   }
 }

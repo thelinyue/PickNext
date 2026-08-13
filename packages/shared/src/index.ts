@@ -66,6 +66,8 @@ const songListBaseSchema = z.object({
   title: z.string(),
   artist: z.string(),
   version: z.string().nullable(),
+  album: z.string().nullable().optional(),
+  coverUrl: z.string().nullable().optional(),
   language: z.string().nullable(),
   genre: z.string().nullable(),
   performanceType: performanceTypeSchema,
@@ -164,6 +166,8 @@ export const pickedSongSchema = z.object({
   title: z.string(),
   artist: z.string(),
   version: z.string().nullable(),
+  album: z.string().nullable().optional(),
+  coverUrl: z.string().nullable().optional(),
   language: z.string().nullable(),
   genre: z.string().nullable(),
   difficulty: difficultySchema.nullable(),
@@ -177,7 +181,9 @@ export const skipSuggestionSchema = z.object({
   songId: z.number().int().positive(),
   title: z.string(),
   artist: z.string(),
-  version: z.string().nullable()
+  version: z.string().nullable(),
+  album: z.string().nullable().optional(),
+  coverUrl: z.string().nullable().optional()
 });
 
 export const pickResponseSchema = z.object({
@@ -215,6 +221,7 @@ export const createSongSchema = z.object({
   title: z.string().trim().min(1).max(120),
   artist: z.string().trim().min(1).max(120),
   version: z.string().trim().max(120).optional(),
+  album: z.string().trim().max(200).optional(),
   language: z.string().trim().max(40).optional(),
   genre: z.string().trim().max(40).optional(),
   difficulty: difficultySchema.optional(),
@@ -237,6 +244,7 @@ export const updateSongSchema = z.object({
   title: z.string().trim().min(1).max(120),
   artist: z.string().trim().min(1).max(120),
   version: z.string().trim().max(120).nullable().optional(),
+  album: z.string().trim().max(200).nullable().optional(),
   language: z.string().trim().max(40).nullable().optional(),
   genre: z.string().trim().max(40).nullable().optional(),
   difficulty: difficultySchema.nullable().optional(),
@@ -246,6 +254,19 @@ export const updateSongSchema = z.object({
   aliases: songAliasesSchema.optional()
 });
 export type UpdateSong = z.infer<typeof updateSongSchema>;
+
+export interface MtwSongMetadata {
+  title: string;
+  artist: string;
+  album: string | null;
+  version: string | null;
+  language: string | null;
+  genre: string | null;
+  lyrics: string | null;
+  path: string | null;
+  artworkAvailable?: boolean;
+  albumversion?: string;
+}
 
 export const collectionUpdateSchema = z.object({ collectionType: collectionTypeSchema });
 export const snoozeSchema = z.object({ until: z.iso.datetime() });
@@ -295,6 +316,12 @@ export const setupSchema = z.object({
 });
 export const loginSchema = setupSchema;
 export const registrationSettingSchema = z.object({ open: z.boolean() });
+export const updateProfileSchema = z.object({
+  nickname: z.string().trim().max(40).nullable().optional(),
+  avatar: z.string().nullable().optional()
+}).refine((value) => value.nickname !== undefined || value.avatar !== undefined, {
+  message: '至少需要更新昵称或头像。'
+});
 
 export const adminCreateUserSchema = setupSchema.extend({
   isMaintainer: z.boolean().default(false),
@@ -332,6 +359,8 @@ export const adminBulkDeletionSchema = adminDeletionSchema.extend({ userIds: adm
 export interface AdminUser {
   id: number;
   username: string;
+  nickname: string | null;
+  displayName: string;
   role: 'admin' | 'user';
   isMaintainer: boolean;
   canAddSongs: boolean;
@@ -404,6 +433,8 @@ export interface HistoryItem {
   title: string;
   artist: string;
   version: string | null;
+  album?: string | null;
+  coverUrl?: string | null;
   status: 'played' | 'skipped';
   occurredAt: string;
   rating: number | null;

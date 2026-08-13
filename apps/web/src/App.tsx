@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { Mic2 } from 'lucide-react';
 import { api, ApiError } from './api.js';
 import { AuthScreen } from './auth.js';
 import { AppShell, NetworkBanner, Toast, type NavigationPage, type PickNavState } from './components.js';
 import { LibraryPage, type SongPrefill } from './library.js';
 import { PickPage, usePickController } from './pick.js';
 import { MePage } from './me.js';
-import { AdminUsersPage } from './admin-users.js';
+import { AdminConsole } from './admin-console.js';
 
-interface User { id: number; username: string; role: 'admin' | 'user'; isMaintainer: boolean; canAddSongs: boolean }
+interface User { id: number; username: string; nickname: string | null; displayName: string; avatarUrl: string | null; role: 'admin' | 'user'; isMaintainer: boolean; canAddSongs: boolean }
 
 /** 将系统分享目标中的标题、文本转换为可编辑的收歌预填值，不在接收分享时直接写入数据库。 */
 export function parseSharedSong(params: URLSearchParams): SongPrefill | null {
@@ -39,13 +40,14 @@ export default function App() {
   const pickController = usePickController(notify, Boolean(me.data?.user));
   const navigate = useCallback((target: NavigationPage) => { if (target === 'library') setLibraryScope('personal'); setPage(target); }, []);
   const openGlobalLibrary = useCallback(() => { setLibraryScope('global'); setPage('library'); }, []);
-  const openAdminUsers = useCallback(() => {
-    history.pushState({ page: 'admin-users' }, '');
-    setPage('admin-users');
+  const openAdmin = useCallback(() => {
+    history.pushState({ page: 'admin' }, '');
+    setPage('admin');
   }, []);
-  const closeAdminUsers = useCallback(() => {
-    if (history.state?.page === 'admin-users') history.back();
-    else setPage('me');
+  const closeAdmin = useCallback(() => {
+    // 管理后台是应用内状态，不需要通过浏览器历史回退，避免回退时触发旧页面的网络恢复逻辑。
+    history.replaceState({}, '', location.pathname);
+    setPage('me');
   }, []);
   const pickState: PickNavState = pickController.busy || pickController.initializing
     ? 'loading'
@@ -86,13 +88,14 @@ export default function App() {
     return () => { window.removeEventListener('offline', handleOffline); window.removeEventListener('online', handleOnline); };
   }, [client, notify]);
   useEffect(() => {
-    const handlePopState = () => setPage((current) => current === 'admin-users' ? 'me' : current);
+    const handlePopState = () => setPage((current) => current === 'admin' ? 'me' : current);
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
-  if (setup.isLoading || (setup.data?.required === false && me.isLoading)) return <div className="splash"><div className="brand-pulse">🎙️</div><span>PickNext</span></div>;
+  // 启动阶段使用与登录页一致的线性话筒图标，避免 emoji 在不同系统上的渲染差异。
+  if (setup.isLoading || (setup.data?.required === false && me.isLoading)) return <div className="splash"><div className="splash-brand" aria-hidden="true"><span className="splash-orbit splash-orbit-one" /><span className="splash-orbit splash-orbit-two" /><span className="brand-pulse"><Mic2 /></span></div><span className="splash-wordmark">PickNext</span><span className="splash-caption">正在准备你的下一首</span></div>;
   if (setup.isError) return <div className="fatal"><span>{setup.error instanceof Error ? setup.error.message : '无法连接 PickNext 服务。'}</span><button className="button" onClick={() => void setup.refetch()}>重新连接</button></div>;
   if (setup.data?.required || me.error instanceof ApiError && me.error.status === 401) return <AuthScreen setupRequired={Boolean(setup.data?.required)} registrationOpen={Boolean(setup.data?.registrationOpen)} onSuccess={refreshAuth} />;
   if (!me.data?.user) return <div className="fatal"><span>{me.error instanceof Error ? me.error.message : '读取账号信息失败。'}</span><button className="button" onClick={() => void me.refetch()}>重新连接</button></div>;
-  return <AppShell page={page} onNavigate={navigate} onPickAction={runPickAction} pickState={pickState}>{!online && <NetworkBanner />}{page === 'library' && <LibraryPage notify={notify} canEditGlobal={me.data.user.role === 'admin' || me.data.user.isMaintainer} initialScope={libraryScope} initialAddSong={sharedSong} onSharedSongConsumed={() => setSharedSong(null)} />}{page === 'pick' && <PickPage notify={notify} controller={pickController} onOpenGlobalLibrary={openGlobalLibrary} canAddSongs={me.data.user.canAddSongs} />}{page === 'me' && <MePage user={me.data.user} notify={notify} onManageUsers={openAdminUsers} onLogout={() => { client.clear(); location.reload(); }} />}{page === 'admin-users' && <AdminUsersPage onBack={closeAdminUsers} notify={notify} />}<Toast message={toast} /></AppShell>;
+  return <AppShell page={page} onNavigate={navigate} onPickAction={runPickAction} pickState={pickState}>{!online && <NetworkBanner />}{page === 'library' && <LibraryPage notify={notify} canEditGlobal={me.data.user.role === 'admin' || me.data.user.isMaintainer} initialScope={libraryScope} initialAddSong={sharedSong} onSharedSongConsumed={() => setSharedSong(null)} />}{page === 'pick' && <PickPage notify={notify} controller={pickController} onOpenGlobalLibrary={openGlobalLibrary} canAddSongs={me.data.user.canAddSongs} />}{page === 'me' && <MePage user={me.data.user} notify={notify} onOpenAdmin={openAdmin} onLogout={() => { client.clear(); location.reload(); }} />}{page === 'admin' && <AdminConsole user={me.data.user} onBack={closeAdmin} notify={notify} />}<Toast message={toast} /></AppShell>;
 }

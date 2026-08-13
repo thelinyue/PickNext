@@ -4,7 +4,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import { Check, ChevronRight, Filter, Mic2, MoonStar, Pause, Play, SlidersHorizontal, Subtitles, X } from 'lucide-react';
 import type { PickContextResponse, PickFilters, PickRequest, PickResponse } from '@picknext/shared';
 import { api, ApiError } from './api.js';
-import { Button, EmptyState, IconButton, PageHeader, Sheet } from './components.js';
+import { Button, CoverImage, EmptyState, IconButton, PageHeader, Sheet } from './components.js';
 
 const emptyFilters: PickFilters = { languages: [], genres: [], difficulties: [], ratings: [], performanceTypes: [] };
 
@@ -161,12 +161,29 @@ export function PickPage({ notify, controller, onOpenGlobalLibrary, canAddSongs 
   const [completeOpen, setCompleteOpen] = useState(false);
   const [karaokeOpen, setKaraokeOpen] = useState(false);
   const [skipActionBusy, setSkipActionBusy] = useState<'snooze' | 'learning' | 'keep' | null>(null);
+  const [lyricsCandidates, setLyricsCandidates] = useState<Array<{ id: string; title: string; artist: string; album: string; lyrics: string }> | null>(null);
   const lyrics = useQuery({
     queryKey: ['song-detail', current?.song.id],
     queryFn: () => api<PickSongDetail>(`/api/songs/${current!.song.id}`),
     enabled: Boolean(current)
   });
   useEffect(() => setKaraokeOpen(false), [current?.eventId]);
+  const fetchLyrics = async () => {
+    if (!current) return;
+    try {
+      const result = await api<{ candidates: Array<{ id: string; title: string; artist: string; album: string; lyrics: string }> }>(`/api/songs/${current.song.id}/lyrics-candidates`);
+      if (!result.candidates.length) { notify('MTW 没有找到匹配歌词。'); return; }
+      if (result.candidates.length === 1) { await saveLyrics(result.candidates[0]!); return; }
+      setLyricsCandidates(result.candidates);
+    } catch (reason) { notify(reason instanceof Error ? reason.message : '获取 MTW 歌词失败'); }
+  };
+  const saveLyrics = async (candidate: { lyrics: string; id: string }) => {
+    if (!current) return;
+    try {
+      const result = await api<{ status: 'approved' | 'pending_review' }>(`/api/songs/${current.song.id}/lyrics-submissions`, { method: 'POST', body: JSON.stringify({ lyrics: candidate.lyrics, source: `mtw:${candidate.id}` }) });
+      setLyricsCandidates(null); await lyrics.refetch(); notify(result.status === 'approved' ? 'MTW 歌词已保存。' : '歌词已提交审核。');
+    } catch (reason) { notify(reason instanceof Error ? reason.message : '保存歌词失败'); }
+  };
   const finish = async (rating?: number, note?: string, keyShift?: number) => { await complete(rating, note, keyShift); setCompleteOpen(false); };
   const requestComplete = () => current?.song.rating ? void finish() : setCompleteOpen(true);
   const preview = useMemo(() => readableLyricLines(lyrics.data?.lyrics ?? '').slice(0, 3), [lyrics.data?.lyrics]);
@@ -198,8 +215,8 @@ export function PickPage({ notify, controller, onOpenGlobalLibrary, canAddSongs 
   return <section className="page pick-page"><PageHeader eyebrow="感知随机 · 本场不重复" title="下一首唱什么" action={<IconButton label="筛选" onClick={() => setFilterOpen(true)}><SlidersHorizontal /></IconButton>} />
     {context && context.counts.nextKtv > 0 && <p className="pick-ktv-status"><Mic2 size={15} />下一次 KTV · 剩余 {context.counts.nextKtv} 首</p>}
     <div className="pick-stage"><AnimatePresence mode="wait">{current ? <motion.article key={current.eventId} className="pick-card" initial={{ opacity: 0, y: 28, rotate: -1 }} animate={{ opacity: 1, y: 0, rotate: 0 }} exit={{ opacity: 0, y: -20, scale: .97 }}>
-      <div className="vinyl"><Mic2 /></div><p className="pick-reason">{current.reason}</p><h2>{current.song.title}</h2><h3>{current.song.artist}{current.song.version ? ` · ${current.song.version}` : ''}</h3><div className="pick-meta"><span>{current.song.language ?? '语种未填'}</span><span>{current.song.genre ?? '曲风未填'}</span>{current.song.keyShift !== null && <span>{current.song.keyShift > 0 ? '+' : ''}{current.song.keyShift} Key</span>}</div>
-      <button className={`pick-lyrics-preview ${preview.length ? '' : 'empty'}`} onClick={() => preview.length ? setKaraokeOpen(true) : notify('这首歌还没有歌词，可在曲库详情中添加。')}><Subtitles size={17} /><span>{preview.length ? preview.map((line) => <i key={line}>{line}</i>) : <i>暂无歌词</i>}</span><b>{preview.length ? '歌词计时跟唱' : '去曲库添加'}</b></button>
+      <div className="vinyl"><CoverImage className="vinyl-cover" url={current.song.coverUrl} alt={`${current.song.title}封面`} /></div><p className="pick-reason">{current.reason}</p><h2>{current.song.title}</h2><h3>{current.song.artist}{current.song.version ? ` · ${current.song.version}` : ''}</h3><div className="pick-meta"><span>{current.song.album ?? '专辑未填'}</span><span>{current.song.language ?? '语种未填'}</span><span>{current.song.genre ?? '曲风未填'}</span>{current.song.keyShift !== null && <span>{current.song.keyShift > 0 ? '+' : ''}{current.song.keyShift} Key</span>}</div>
+      <button className={`pick-lyrics-preview ${preview.length ? '' : 'empty'}`} onClick={() => preview.length ? setKaraokeOpen(true) : void fetchLyrics()}><Subtitles size={17} /><span>{preview.length ? preview.map((line) => <i key={line}>{line}</i>) : <i>暂无歌词</i>}</span><b>{preview.length ? '歌词计时跟唱' : '从 MTW 获取'}</b></button>
       <p className="candidate-count">本轮候选 {current.candidateCount} 首 · {current.algorithmVersion}</p>
       <Button className="complete" onClick={requestComplete} loading={operation === 'saving'} disabled={busy}><Check />{operation === 'saving' ? '正在保存' : '唱完了'}</Button>
     </motion.article> : <motion.div key="empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>{empty}</motion.div>}</AnimatePresence></div>
@@ -209,6 +226,7 @@ export function PickPage({ notify, controller, onOpenGlobalLibrary, canAddSongs 
     <SkipSuggestionSheet suggestion={skipSuggestion} busy={skipActionBusy} onOpenChange={(open) => { if (!open) dismissSkipSuggestion(); }} onAction={(action) => void resolveSkipSuggestion(action)} />
     <Sheet open={exhaustedOpen} onOpenChange={setExhaustedOpen} title={ktvExhausted ? '下一次 KTV 已唱完' : '本场已经唱完'}><div className="sheet-stack"><p className="helper">{ktvExhausted ? '准备的 KTV 歌曲已经全部处理完，可以继续从会唱曲库 Pick，或结束本场。' : '当前条件下没有尚未抽取的歌曲。本场不会重复推荐已经抽取过的歌曲。'}</p>{ktvExhausted ? <Button onClick={() => void pick(true)}><Mic2 size={18} />继续唱会唱曲库</Button> : <Button onClick={() => { setExhaustedOpen(false); setFilterOpen(true); }}><SlidersHorizontal size={18} />调整筛选继续</Button>}<Button className="secondary" loading={operation === 'ending'} onClick={() => void endSession()}><Check size={18} />结束本场</Button></div></Sheet>
     <KaraokeOverlay open={karaokeOpen} song={current ? { id: current.song.id, title: current.song.title, artist: current.song.artist } : null} lyrics={lyrics.data?.lyrics ?? ''} onClose={() => setKaraokeOpen(false)} onComplete={() => { setKaraokeOpen(false); requestComplete(); }} onNext={() => { setKaraokeOpen(false); void pick(); }} notify={notify} />
+    <Sheet open={Boolean(lyricsCandidates)} onOpenChange={(open) => !open && setLyricsCandidates(null)} title="选择 MTW 歌词"><div className="sheet-stack">{lyricsCandidates?.map((candidate) => <button className="candidate-option" key={candidate.id} onClick={() => void saveLyrics(candidate)}><strong>{candidate.album}</strong><span>{candidate.title} · {candidate.artist}</span><small>{readableLyricLines(candidate.lyrics).slice(0, 2).join(' / ')}</small></button>)}</div></Sheet>
   </section>;
 }
 
@@ -233,10 +251,20 @@ function parseKaraokeLines(input: string): KaraokeLine[] {
   for (const raw of input.split(/\r?\n/)) {
     const timestamps = [...raw.matchAll(/\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]/g)];
     const text = raw.replace(/\[[^\]]+\]/g, '').trim();
-    for (const match of timestamps) timed.push({ time: Number(match[1]) * 60 + Number(match[2]) + Number(`0.${match[3] ?? 0}`), text });
+    for (const match of timestamps) {
+      // LRC 中的空时间轴常用于分隔或占位，不应在跟唱界面显示成“♪”。
+      if (text) timed.push({ time: Number(match[1]) * 60 + Number(match[2]) + Number(`0.${match[3] ?? 0}`), text });
+    }
   }
   if (timed.length) return timed.sort((a, b) => (a.time ?? 0) - (b.time ?? 0));
   return readableLyricLines(input).map((text) => ({ time: null, text }));
+}
+
+function formatKaraokeTime(time: number | null): string {
+  if (time === null) return '未计时';
+  const minutes = Math.floor(time / 60);
+  const seconds = time % 60;
+  return `${minutes}:${seconds.toFixed(2).padStart(5, '0')}`;
 }
 
 /** PWA 跟唱使用应用内计时，不缓存音频；点击歌词行可随时重新对齐当前进度。 */
@@ -266,7 +294,7 @@ function KaraokeOverlay({ open, song, lyrics, onClose, onComplete, onNext, notif
     setManualLine(index);
     if (line.time !== null) { setElapsed(Math.max(0, line.time - offset)); startedAt.current = Date.now() - Math.max(0, line.time - offset) * 1000; }
   };
-  return <section className="karaoke-overlay" role="dialog" aria-modal="true" aria-label={`${song.title}歌词计时跟唱`}><header><div><strong>{song.title}</strong><span>{song.artist}</span></div><IconButton label="关闭跟唱" onClick={onClose}><X /></IconButton></header><div className="karaoke-controls"><Button className="secondary" onClick={toggle}>{playing ? <Pause size={18} /> : <Play size={18} />}{playing ? '暂停' : '开始计时'}</Button><button onClick={() => setOffset((value) => value - .5)}>−0.5s</button><span>{offset > 0 ? '+' : ''}{offset.toFixed(1)}s</span><button onClick={() => setOffset((value) => value + .5)}>+0.5s</button></div><div className="karaoke-lines">{lines.map((line, index) => <button className={index === active ? 'active' : ''} key={`${line.time}-${index}`} onClick={() => align(line, index)}>{line.text || '♪'}</button>)}</div><p className="karaoke-hint">只提供歌词计时，不播放伴奏、不录音或评分；轻点歌词可重新对齐</p><footer><Button className="secondary" onClick={onComplete}><Check size={18} />唱完了</Button><Button onClick={onNext}>跳过这首<ChevronRight size={18} /></Button></footer></section>;
+  return <section className="karaoke-overlay" role="dialog" aria-modal="true" aria-label={`${song.title}歌词计时跟唱`}><header><div><strong>{song.title}</strong><span>{song.artist}</span></div><IconButton label="关闭跟唱" onClick={onClose}><X /></IconButton></header><div className="karaoke-controls"><Button className="secondary" onClick={toggle}>{playing ? <Pause size={18} /> : <Play size={18} />}{playing ? '暂停' : '开始计时'}</Button><button onClick={() => setOffset((value) => value - .5)}>−0.5s</button><span>{offset > 0 ? '+' : ''}{offset.toFixed(1)}s</span><button onClick={() => setOffset((value) => value + .5)}>+0.5s</button></div><div className="karaoke-lines">{lines.map((line, index) => <button className={index === active ? 'active' : ''} key={`${line.time}-${index}`} onClick={() => align(line, index)}><small>{formatKaraokeTime(line.time)}</small><span>{line.text}</span></button>)}</div><p className="karaoke-hint">上下拖动浏览歌词，点击歌词行重新对齐；只提供歌词计时，不播放伴奏、不录音或评分</p><footer><Button className="secondary" onClick={onComplete}><Check size={18} />唱完了</Button><Button onClick={onNext}>跳过这首<ChevronRight size={18} /></Button></footer></section>;
 }
 
 function FilterSheet({ open, onOpenChange, filters, setFilters, avoidRecent, setAvoidRecent, facets, onApply }: any) {
