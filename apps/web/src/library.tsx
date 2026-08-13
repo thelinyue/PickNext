@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import * as Tabs from '@radix-ui/react-tabs';
-import { ChevronRight, Filter, ListPlus, Mic2, Pause, Pencil, Play, Plus, RotateCcw, Save, Search, Sparkles, Subtitles, X } from 'lucide-react';
+import { Archive, ChevronRight, Filter, ListChecks, ListPlus, Mic2, Pause, Pencil, Play, Plus, RotateCcw, Save, Search, Sparkles, Subtitles, Trash2, X } from 'lucide-react';
 import type { CollectionType, Difficulty, LibraryFilters, LibraryScene, PersonalSongListItem, SearchSongsResponse, SongListItem, SongListScope } from '@picknext/shared';
 import { api, ApiError } from './api.js';
 import { BasicSongCard, Button, EmptyState, IconButton, PageHeader, Sheet, SongCard } from './components.js';
@@ -30,6 +30,9 @@ export function LibraryPage({ notify, canEditGlobal, initialScope = 'personal' }
   const [detail, setDetail] = useState<SongListItem | null>(null);
   const [editSong, setEditSong] = useState<SongListItem | null>(null);
   const [lyricsSong, setLyricsSong] = useState<PersonalSongListItem | null>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [batchOpen, setBatchOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [filtersByView, setFiltersByView] = useState<Record<string, LibraryFilters>>({ repertoire: emptyFilters(), learning: emptyFilters(), global: emptyFilters() });
   const [jumpOffset, setJumpOffset] = useState(0);
@@ -73,6 +76,18 @@ export function LibraryPage({ notify, canEditGlobal, initialScope = 'personal' }
       notify(variables.target === 'repertoire' ? '已加入会唱曲库' : '已加入待学清单');
     }
   });
+  const batchUpdate = useMutation({
+    mutationFn: (body: { action: 'set_collection' | 'snooze' | 'unsnooze' | 'remove'; collectionType?: CollectionType; until?: string }) => api<{ updated: number }>('/api/user-songs/batch', {
+      method: 'POST', body: JSON.stringify({ ...body, songIds: [...selectedIds] })
+    }),
+    onSuccess: async (_result, variables) => {
+      setSelectedIds(new Set()); setSelectionMode(false); setBatchOpen(false);
+      await client.invalidateQueries({ queryKey: ['library-search'] });
+      const labels = { set_collection: variables.collectionType === 'repertoire' ? '已批量移入会唱曲库' : '已批量移入待学清单', snooze: '已批量冷藏 30 天', unsnooze: '已批量解除冷藏', remove: '已批量移出个人曲库' };
+      notify(labels[variables.action]);
+    },
+    onError: (reason) => notify(reason instanceof Error ? reason.message : '批量操作未保存，请重试')
+  });
   const addKtv = useMutation({
     mutationFn: (id: number) => api(`/api/playlists/next-ktv/${id}`, { method: 'PUT', body: '{}' }),
     onSuccess: async () => { await client.invalidateQueries({ queryKey: ['next-ktv'] }); notify('已加入下一次 KTV'); }
@@ -96,10 +111,16 @@ export function LibraryPage({ notify, canEditGlobal, initialScope = 'personal' }
     onSuccess: async () => { await client.invalidateQueries({ queryKey: ['playlists'] }); notify('已加入歌单'); }
   });
 
-  useEffect(() => { setJumpOffset(0); }, [scope, collection, search, serializedFilters]);
+  useEffect(() => { setJumpOffset(0); setSelectedIds(new Set()); setSelectionMode(false); }, [scope, collection, search, serializedFilters]);
   const goPersonal = (target: CollectionType) => { setCollection(target); setScope('personal'); setDetail(null); };
   const setScene = (scene: LibraryScene) => setFiltersByView((current) => ({ ...current, [viewKey]: { ...emptyFilters(), scene } }));
   const clearFilters = () => setFiltersByView((current) => ({ ...current, [viewKey]: emptyFilters() }));
+  const toggleSelection = (songId: number) => setSelectedIds((current) => {
+    const next = new Set(current);
+    if (next.has(songId)) next.delete(songId); else next.add(songId);
+    return next;
+  });
+  const leaveSelectionMode = () => { setSelectionMode(false); setSelectedIds(new Set()); };
   const jumpTo = (initial: string) => {
     const target = resultMeta?.alphabetIndex.find((item) => item.initial === initial);
     if (!target) return;
@@ -112,7 +133,7 @@ export function LibraryPage({ notify, canEditGlobal, initialScope = 'personal' }
     ? 'global' as const
     : song.collectionType === 'repertoire' ? 'personal-repertoire' as const : 'personal-learning' as const;
 
-  return <section className="page library-page"><PageHeader eyebrow="你的歌，随时想得起来" title="曲库" action={<IconButton label="添加歌曲" onClick={() => setAddOpen(true)}><Plus /></IconButton>} />
+  return <section className="page library-page"><PageHeader eyebrow="你的歌，随时想得起来" title="曲库" action={<div className="library-header-actions">{scope === 'personal' && <Button className="secondary compact" onClick={() => selectionMode ? leaveSelectionMode() : setSelectionMode(true)}><ListChecks size={17} />{selectionMode ? '取消批量' : '批量管理'}</Button>}<IconButton label="添加歌曲" onClick={() => setAddOpen(true)}><Plus /></IconButton></div>} />
     <button className="ktv-card" onClick={() => setKtvOpen(true)}><span className="ktv-icon"><Mic2 /></span><span className="ktv-copy"><strong>下一次 KTV</strong><small>{ktv.data?.songs.length ? `已经准备 ${ktv.data.songs.length} 首 · Pick 时优先` : '先攒几首想唱的歌，Pick 时优先'}</small></span><span className="ktv-count">{ktv.data?.songs.length ?? 0}</span><ChevronRight size={19} /></button>
     <div className="library-search-row"><div className="search-box"><Search size={19} /><input aria-label="搜索歌曲" placeholder="歌名、歌手、拼音或别名" value={search} onChange={(event) => setSearch(event.target.value)} /></div><IconButton label="筛选歌曲" onClick={() => setFiltersOpen(true)}><Filter />{activeFilterCount(filters) > 0 && <small className="filter-count">{activeFilterCount(filters)}</small>}</IconButton></div>
     <Tabs.Root value={scope} onValueChange={(value) => setScope(value as SongListScope)}><Tabs.List className="tabs scope-tabs" aria-label="曲库范围"><Tabs.Trigger value="personal">我的曲库 <small>{counts?.personal ?? 0}</small></Tabs.Trigger><Tabs.Trigger value="global">全部曲库 <small>{counts?.global ?? 0}</small></Tabs.Trigger></Tabs.List></Tabs.Root>
@@ -120,20 +141,22 @@ export function LibraryPage({ notify, canEditGlobal, initialScope = 'personal' }
     <div className="scene-chips" aria-label="快捷筛选">{(sceneOptions[viewKey] ?? []).map(([value, label]) => <button key={value} className={filters.scene === value ? 'active' : ''} onClick={() => setScene(value)}>{label}</button>)}{filters.scene === 'custom' && <button className="active">自定义</button>}</div>
     <p className="library-context">{scope === 'global' ? '全站共享歌曲，只展示公共资料和匿名评分' : collection === 'repertoire' ? '普通 Pick 只从这里选择歌曲' : '正在学习的歌曲不会进入普通 Pick'}</p>
     <div className="library-result-head"><span>{list.isLoading ? '正在查找…' : `找到 ${resultMeta?.total ?? 0} 首`}</span>{activeFilterCount(filters) > 0 && <button onClick={clearFilters}><RotateCcw size={14} />清除筛选</button>}</div>
-    <div className="library-list-wrap"><div className="song-list alphabet-song-list">{shown.map((song, index) => <div key={`${song.scope}-${song.id}`} className="alphabet-song-group">{(index === 0 || shown[index - 1]?.titleInitial !== song.titleInitial) && <h3 id={`song-group-${song.titleInitial}`} className="alphabet-group-title">{song.titleInitial}</h3>}<SongCard song={song} variant={cardVariant(song)} onClick={() => setDetail(song)} action={song.scope === 'personal' ? song.collectionType === 'repertoire'
+    {selectionMode && selectedIds.size > 0 && <div className="batch-toolbar" role="region" aria-label="批量曲库操作"><span>已选 {selectedIds.size} 首</span><Button onClick={() => setBatchOpen(true)}>选择操作</Button><button className="text-action" onClick={() => setSelectedIds(new Set())}>清空选择</button></div>}
+    <div className="library-list-wrap"><div className="song-list alphabet-song-list">{shown.map((song, index) => <div key={`${song.scope}-${song.id}`} className={`alphabet-song-group ${selectionMode && selectedIds.has(song.id) ? 'selection-selected' : ''}`}>{(index === 0 || shown[index - 1]?.titleInitial !== song.titleInitial) && <h3 id={`song-group-${song.titleInitial}`} className="alphabet-group-title">{song.titleInitial}</h3>}{selectionMode && song.scope === 'personal' && <label className="song-selection"><input type="checkbox" checked={selectedIds.has(song.id)} onChange={() => toggleSelection(song.id)} aria-label={`选择${song.title}`} /><span>选择</span></label>}<SongCard song={song} variant={cardVariant(song)} onClick={() => selectionMode && song.scope === 'personal' ? toggleSelection(song.id) : setDetail(song)} action={selectionMode && song.scope === 'personal' ? undefined : song.scope === 'personal' ? song.collectionType === 'repertoire'
       ? <IconButton label={`将${song.title}加入下一次 KTV`} onClick={() => addKtv.mutate(song.id)}><ListPlus size={19} /></IconButton>
       : <IconButton label={`将${song.title}转为会唱`} onClick={() => updateCollection.mutate({ id: song.id, target: 'repertoire' })}><Sparkles size={19} /></IconButton>
       : song.collectionType === null ? <button className="collect-button" onClick={() => setDetail(song)}>＋ 收录</button> : undefined} /></div>)}</div>{Boolean(resultMeta?.alphabetIndex.length) && <nav className="alphabet-rail" aria-label="按歌名首字母定位">{alphabet.map((letter) => <button key={letter} disabled={!resultMeta?.alphabetIndex.some((item) => item.initial === letter)} onPointerEnter={(event) => event.buttons === 1 && jumpTo(letter)} onClick={() => jumpTo(letter)} aria-label={`定位到 ${letter} 组`}>{letter}</button>)}</nav>}</div>
     {letterFeedback && <div className="letter-feedback" role="status">{letterFeedback}</div>}
     {!list.isLoading && !shown.length && <EmptyState
       title={search || activeFilterCount(filters) ? '没有符合条件的歌曲' : scope === 'global' ? '全部曲库还是空的' : collection === 'repertoire' ? '会唱曲库还是空的' : '待学清单还是空的'}
-      description={search || activeFilterCount(filters) ? '试试修改关键词或清除筛选。' : scope === 'global' ? '添加第一首全站歌曲，收录后即可长期管理。' : collection === 'repertoire' ? '从全部曲库收录会唱的歌，Pick 才真正懂你。' : '把想学的歌先放在这里，不会进入普通 Pick。'}
+      description={search || activeFilterCount(filters) ? '搜索范围包含歌名、歌手、版本、拼音、别名、歌词和个人备注；可以修改关键词或清除筛选。' : scope === 'global' ? '添加第一首全站歌曲，收录后即可长期管理。' : collection === 'repertoire' ? '从全部曲库收录会唱的歌，Pick 才真正懂你。' : '把想学的歌先放在这里，不会进入普通 Pick。'}
       action={scope === 'personal' && collection === 'repertoire'
-        ? search || activeFilterCount(filters) ? <Button onClick={() => { setSearch(''); clearFilters(); }}>清除查找条件</Button> : <Button onClick={() => setScope('global')}>去全部曲库看看</Button>
+        ? search || activeFilterCount(filters) ? <Button onClick={() => { setSearch(''); clearFilters(); }}>清除查找条件</Button> : <><Button onClick={() => setScope('global')}>去全部曲库选歌</Button><Button className="secondary" onClick={() => setCollection('learning')}>查看待学清单</Button></>
         : <Button onClick={() => setAddOpen(true)}><Plus size={18} />添加歌曲</Button>}
     />}
     {list.hasNextPage && <Button className="secondary load-more" disabled={list.isFetchingNextPage} onClick={() => list.fetchNextPage()}>{list.isFetchingNextPage ? '正在加载' : '加载更多'}</Button>}
     <AddSongSheet open={addOpen} onOpenChange={setAddOpen} defaultCollection={collection} onAdded={async (message) => { setAddOpen(false); await client.invalidateQueries({ queryKey: ['library-search'] }); notify(message); }} />
+    <BatchActionSheet open={batchOpen} count={selectedIds.size} onOpenChange={setBatchOpen} loading={batchUpdate.isPending} onAction={(body) => batchUpdate.mutate(body)} />
     <Sheet open={detail !== null} onOpenChange={(open) => !open && setDetail(null)} title="歌曲操作">{detail && <div className="sheet-stack"><SongCard song={detail} variant={cardVariant(detail)} />{canEditGlobal && <Button className="secondary" onClick={() => { setEditSong(detail); setDetail(null); }}><Pencil size={18} />编辑全局歌曲信息</Button>}{detail.scope === 'global' ? detail.collectionType === null ? <>
       <Button onClick={() => updateCollection.mutate({ id: detail.id, target: 'repertoire' })}>我会唱，加入会唱曲库</Button>
       <Button className="secondary" onClick={() => updateCollection.mutate({ id: detail.id, target: 'learning' })}>还不会，加入待学清单</Button>
@@ -162,6 +185,26 @@ function activeFilterCount(filters: LibraryFilters) {
   return filters.languages.length + filters.genres.length + filters.difficulties.length + (filters.minRating ? 1 : 0) + (filters.scene !== 'all' ? 1 : 0);
 }
 
+function BatchActionSheet({ open, count, loading, onOpenChange, onAction }: {
+  open: boolean;
+  count: number;
+  loading: boolean;
+  onOpenChange(open: boolean): void;
+  onAction(body: { action: 'set_collection' | 'snooze' | 'unsnooze' | 'remove'; collectionType?: CollectionType; until?: string }): void;
+}) {
+  const [removeConfirm, setRemoveConfirm] = useState(false);
+  useEffect(() => { if (!open) setRemoveConfirm(false); }, [open]);
+  const snoozeUntil = () => new Date(Date.now() + 30 * 86_400_000).toISOString();
+  return <Sheet open={open} onOpenChange={onOpenChange} title={`批量管理 ${count} 首歌曲`}><div className="sheet-stack">
+    <p className="helper">所有操作会一次性保存；如果有歌曲不属于当前曲库，整批都会取消。</p>
+    <Button loading={loading} onClick={() => onAction({ action: 'set_collection', collectionType: 'repertoire' })}><Sparkles size={18} />移入会唱曲库</Button>
+    <Button className="secondary" loading={loading} onClick={() => onAction({ action: 'set_collection', collectionType: 'learning' })}><Archive size={18} />移入待学清单</Button>
+    <Button className="secondary" loading={loading} onClick={() => onAction({ action: 'snooze', until: snoozeUntil() })}><Archive size={18} />冷藏 30 天</Button>
+    <Button className="secondary" loading={loading} onClick={() => onAction({ action: 'unsnooze' })}>解除冷藏</Button>
+    {removeConfirm ? <div className="inline-confirm"><span>确认将这 {count} 首歌移出个人曲库？全局歌曲会保留。</span><button type="button" onClick={() => setRemoveConfirm(false)}>取消</button><button type="button" className="danger-text" onClick={() => onAction({ action: 'remove' })}>确认移出</button></div> : <Button className="secondary danger-button" onClick={() => setRemoveConfirm(true)}><Trash2 size={18} />移出个人曲库</Button>}
+  </div></Sheet>;
+}
+
 function LibraryFilterSheet({ open, onOpenChange, value, facets, scope, onApply }: { open: boolean; onOpenChange(open: boolean): void; value: LibraryFilters; facets: { languages: string[]; genres: string[] }; scope: SongListScope; onApply(value: LibraryFilters): void }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => { if (open) setDraft(value); }, [open, value]);
@@ -182,6 +225,7 @@ interface SongDetail {
   id: number; title: string; artist: string; version: string | null; language: string | null;
   genre: string | null; difficulty: 'easy' | 'medium' | 'hard' | null;
   performanceType: 'solo' | 'duet' | 'chorus'; lyrics: string | null; lyricsTranslit: string | null;
+  aliases: string[];
   collectionType: CollectionType | null; rating: number | null; personalDifficulty: Difficulty | null;
   keyShift: number | null; note: string | null; memoryCue: string | null;
 }
@@ -216,7 +260,8 @@ function EditSongSheet({ song, onClose, onSaved, notify }: { song: SongListItem 
         title: data.get('title'), artist: data.get('artist'), version: data.get('version') || null,
         language: data.get('language') || null, genre: data.get('genre') || null,
         difficulty: data.get('difficulty') || null, performanceType: data.get('performanceType'),
-        lyrics: data.get('lyrics') || null, lyricsTranslit: data.get('lyricsTranslit') || null
+        lyrics: data.get('lyrics') || null, lyricsTranslit: data.get('lyricsTranslit') || null,
+        aliases: String(data.get('aliases') ?? '').split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
       }) });
       await onSaved();
       notify('全局歌曲信息已更新');
@@ -225,7 +270,7 @@ function EditSongSheet({ song, onClose, onSaved, notify }: { song: SongListItem 
   };
   const value = detail.data;
   return <Sheet open={song !== null} onOpenChange={(open) => !open && onClose()} title="编辑全局歌曲">{value
-    ? <form key={`${value.id}-${value.title}`} className="form-stack" onSubmit={submit}><label>歌名<input name="title" required defaultValue={value.title} /></label><label>歌手<input name="artist" required defaultValue={value.artist} /></label><div className="form-grid"><label>版本<input name="version" defaultValue={value.version ?? ''} /></label><label>语种<input name="language" defaultValue={value.language ?? ''} /></label></div><div className="form-grid"><label>曲风<input name="genre" defaultValue={value.genre ?? ''} /></label><label>参考难度<select name="difficulty" defaultValue={value.difficulty ?? ''}><option value="">未设置</option><option value="easy">简单</option><option value="medium">中等</option><option value="hard">困难</option></select></label></div><label>演唱类型<select name="performanceType" defaultValue={value.performanceType}><option value="solo">独唱</option><option value="duet">对唱</option><option value="chorus">合唱</option></select></label><label>LRC / 歌词<textarea className="global-lyrics-editor" name="lyrics" defaultValue={value.lyrics ?? ''} placeholder="[00:12.00]第一句歌词" /></label><label>音译歌词<textarea name="lyricsTranslit" defaultValue={value.lyricsTranslit ?? ''} /></label><Button disabled={busy} type="submit"><Save size={18} />保存全局信息</Button></form>
+    ? <form key={`${value.id}-${value.title}`} className="form-stack" onSubmit={submit}><label>歌名<input name="title" required defaultValue={value.title} /></label><label>歌手<input name="artist" required defaultValue={value.artist} /></label><div className="form-grid"><label>版本<input name="version" defaultValue={value.version ?? ''} /></label><label>语种<input name="language" defaultValue={value.language ?? ''} /></label></div><div className="form-grid"><label>曲风<input name="genre" defaultValue={value.genre ?? ''} /></label><label>参考难度<select name="difficulty" defaultValue={value.difficulty ?? ''}><option value="">未设置</option><option value="easy">简单</option><option value="medium">中等</option><option value="hard">困难</option></select></label></div><label>演唱类型<select name="performanceType" defaultValue={value.performanceType}><option value="solo">独唱</option><option value="duet">对唱</option><option value="chorus">合唱</option></select></label><label>别名（每行一个，最多 20 个）<textarea name="aliases" defaultValue={value.aliases.join('\n')} placeholder="粤语版\n现场版" /></label><label>LRC / 歌词<textarea className="global-lyrics-editor" name="lyrics" defaultValue={value.lyrics ?? ''} placeholder="[00:12.00]第一句歌词" /></label><label>音译歌词<textarea name="lyricsTranslit" defaultValue={value.lyricsTranslit ?? ''} /></label><Button disabled={busy} type="submit"><Save size={18} />保存全局信息</Button></form>
     : <p className="helper">正在读取歌曲信息……</p>}</Sheet>;
 }
 
@@ -301,6 +346,7 @@ function AddSongSheet({ open, onOpenChange, defaultCollection, onAdded }: { open
       language: data.get('language') || undefined, genre: data.get('genre') || undefined,
       difficulty: data.get('difficulty') || undefined, collectionType,
       performanceType: data.get('performanceType'),
+      aliases: String(data.get('aliases') ?? '').split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
       personalDifficulty: collectionType ? data.get('personalDifficulty') || null : null,
       note: collectionType ? data.get('note') || undefined : undefined
     });
@@ -313,6 +359,7 @@ function AddSongSheet({ open, onOpenChange, defaultCollection, onAdded }: { open
       <div className="form-grid"><label>版本<input name="version" placeholder="Live / 女声版" /></label><label>语种<input name="language" placeholder="国语" /></label></div>
       <div className="form-grid"><label>曲风<input name="genre" placeholder="流行" /></label><label>演唱类型<select name="performanceType"><option value="solo">独唱</option><option value="duet">对唱</option><option value="chorus">合唱</option></select></label></div>
       <div className="form-grid"><label>参考难度<select name="difficulty"><option value="">未设置</option><option value="easy">简单</option><option value="medium">中等</option><option value="hard">困难</option></select></label><label>我的难度<select name="personalDifficulty"><option value="">使用参考难度</option><option value="easy">简单</option><option value="medium">中等</option><option value="hard">困难</option></select></label></div>
+      <label>别名（每行一个）<textarea name="aliases" placeholder="粤语版\n现场版" /></label>
       <label>个人归属<select name="collectionType" defaultValue={defaultCollection}><option value="learning">待学清单</option><option value="repertoire">会唱曲库</option><option value="">仅维护全局资料，不收录到我的个人曲库</option></select></label>
       <label>我的备注<textarea name="note" placeholder="副歌高音、进歌提示……" /></label>
       <p className="helper">不收录时歌曲仍会进入全部曲库，但不会影响你的个人曲库和 Pick。</p>

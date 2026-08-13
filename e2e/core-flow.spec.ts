@@ -99,6 +99,14 @@ test.describe.serial('PickNext v1.0 移动端核心闭环', () => {
     await page.getByRole('button', { name: '查看海阔天空详情' }).click();
     await page.getByRole('button', { name: '加入会唱曲库' }).click();
 
+    await page.getByRole('tab', { name: /我的曲库/ }).click();
+    await page.getByRole('button', { name: '批量管理' }).click();
+    await page.getByRole('checkbox', { name: '选择晴天' }).check();
+    await page.getByRole('checkbox', { name: '选择海阔天空' }).check();
+    await page.getByRole('button', { name: '选择操作' }).click();
+    await page.getByRole('button', { name: '移入会唱曲库' }).click();
+    await expect(page.getByRole('status')).toContainText('已批量移入会唱曲库');
+
     await page.getByRole('button', { name: '开始 Pick' }).click();
     await expect(page.getByRole('heading', { name: '晴天' })).toBeVisible();
     await expect(page.getByRole('button', { name: '跳过这首' })).toBeVisible();

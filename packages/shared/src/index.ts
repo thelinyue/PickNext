@@ -38,6 +38,9 @@ const csvDifficultiesSchema = z.preprocess((value) => {
   return [];
 }, z.array(difficultySchema).max(3).default([]));
 
+const songAliasesSchema = z.array(z.string().trim().min(1).max(120)).max(20)
+  .transform((aliases) => [...new Set(aliases)]);
+
 export const searchSongsQuerySchema = z.object({
   scope: songListScopeSchema.default('global'),
   collection: collectionTypeSchema.optional(),
@@ -210,7 +213,7 @@ export const createSongSchema = z.object({
   performanceType: performanceTypeSchema.default('solo'),
   lyrics: z.string().max(200_000).optional(),
   lyricsTranslit: z.string().max(200_000).optional(),
-  aliases: z.array(z.string().trim().min(1).max(120)).max(20).default([]),
+  aliases: songAliasesSchema.default([]),
   // 未传值时保持历史默认进入待学；显式传 null 表示只维护全局歌曲，不收录到个人曲库。
   collectionType: collectionTypeSchema.nullable().optional().default('learning'),
   personalDifficulty: difficultySchema.nullable().optional(),
@@ -231,12 +234,34 @@ export const updateSongSchema = z.object({
   difficulty: difficultySchema.nullable().optional(),
   performanceType: performanceTypeSchema,
   lyrics: z.string().max(200_000).nullable().optional(),
-  lyricsTranslit: z.string().max(200_000).nullable().optional()
+  lyricsTranslit: z.string().max(200_000).nullable().optional(),
+  aliases: songAliasesSchema.optional()
 });
 export type UpdateSong = z.infer<typeof updateSongSchema>;
 
 export const collectionUpdateSchema = z.object({ collectionType: collectionTypeSchema });
 export const snoozeSchema = z.object({ until: z.iso.datetime() });
+export const userSongBatchActionSchema = z.enum(['set_collection', 'snooze', 'unsnooze', 'remove']);
+export const userSongBatchSchema = z.object({
+  songIds: z.array(z.number().int().positive()).min(1).max(200).transform((ids) => [...new Set(ids)]),
+  action: userSongBatchActionSchema,
+  collectionType: collectionTypeSchema.optional(),
+  until: z.iso.datetime().optional()
+}).superRefine((value, context) => {
+  if (value.action === 'set_collection' && !value.collectionType) {
+    context.addIssue({ code: 'custom', path: ['collectionType'], message: '切换曲库时必须指定会唱或待学。' });
+  }
+  if (value.action === 'snooze' && !value.until) {
+    context.addIssue({ code: 'custom', path: ['until'], message: '批量冷藏时必须指定结束时间。' });
+  }
+  if (value.action !== 'snooze' && value.until !== undefined) {
+    context.addIssue({ code: 'custom', path: ['until'], message: '只有批量冷藏可以指定结束时间。' });
+  }
+  if (value.action !== 'set_collection' && value.collectionType !== undefined) {
+    context.addIssue({ code: 'custom', path: ['collectionType'], message: '只有切换个人曲库时可以指定曲库类型。' });
+  }
+});
+export type UserSongBatch = z.infer<typeof userSongBatchSchema>;
 export const updateSongUserMetaSchema = z.object({
   rating: z.number().int().min(1).max(5).nullable().optional(),
   personalDifficulty: difficultySchema.nullable().optional(),

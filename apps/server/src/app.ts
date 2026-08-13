@@ -33,6 +33,7 @@ import {
   searchSongsQuerySchema,
   setupSchema,
   snoozeSchema,
+  userSongBatchSchema,
   updatePlaylistSchema,
   updateSongUserMetaSchema,
   updateSongSchema
@@ -43,6 +44,7 @@ import { ImportTaskQueue } from './import-task-queue.js';
 import { LoginRateLimiter } from './login-rate-limit.js';
 import { PickError, PickService } from './pick-service.js';
 import { buildSongIndex, normalizedSongIdentity } from './song-utils.js';
+import { rebuildSongSearchIndex, rebuildUserSongSearchIndex, toFtsQuery } from './search-index.js';
 import { CatalogService, type CatalogCandidate } from './services/catalog-service.js';
 import type { AppContext, UserPayload } from './types.js';
 
@@ -55,6 +57,17 @@ class SetupAlreadyCompletedError extends Error {
 
   constructor() {
     super('系统已经完成初始化。');
+  }
+}
+
+class UserSongBatchError extends Error {
+  readonly code: string;
+  readonly statusCode: number;
+
+  constructor(message: string, code = 'USER_SONG_NOT_FOUND', statusCode = 404) {
+    super(message);
+    this.code = code;
+    this.statusCode = statusCode;
   }
 }
 
@@ -109,7 +122,7 @@ export async function buildApp(context: AppContext) {
     UPDATE pick_queue_items SET status = 'invalidated' WHERE status = 'pending' AND session_id IN (
       SELECT id FROM pick_sessions WHERE user_id = ? AND ended_at IS NULL
     )
-  `).run(userId);
+  `).run(userId).changes;
   const processImportTask = async (taskId: string): Promise<void> => {
     const task = context.db.prepare('SELECT user_id AS userId, payload, status FROM tasks WHERE id = ? AND type = \'song_import\'').get(taskId) as {
       userId: number;
@@ -620,6 +633,7 @@ export async function buildApp(context: AppContext) {
         status = 'created';
         const aliasInsert = context.db.prepare('INSERT INTO song_aliases(song_id, alias) VALUES (?, ?)');
         for (const alias of body.aliases) aliasInsert.run(songId, alias);
+        rebuildSongSearchIndex(context.db, songId);
       }
       catalog.collectUserSong(user.id, songId, personalPayload);
       return { songId, status };
@@ -631,11 +645,14 @@ export async function buildApp(context: AppContext) {
     const user = currentUser(request);
     const query = searchSongsQuerySchema.parse(request.query);
     const term = `%${query.q}%`;
+    const compactTerm = `%${query.q.replace(/\s+/g, '')}%`;
     const params: Record<string, unknown> = {
       userId: user.id,
       collection: query.collection ?? null,
       query: query.q,
       term,
+      compactTerm,
+      ftsQuery: toFtsQuery(query.q),
       minRating: query.minRating ?? null,
       limit: query.limit,
       offset: query.offset
@@ -689,24 +706,30 @@ export async function buildApp(context: AppContext) {
           CASE WHEN (SELECT count(*) FROM song_user_meta am WHERE am.song_id = s.id AND am.rating IS NOT NULL) >= 3
             THEN (SELECT count(*) FROM song_user_meta am WHERE am.song_id = s.id AND am.rating IS NOT NULL)
             ELSE NULL END AS aggregateRatingCount,
-          group_concat(a.alias, ' ') AS aliases
+          ss.pinyin_compact AS indexedPinyin
         FROM songs s
         LEFT JOIN user_songs us ON us.song_id = s.id AND us.user_id = @userId AND us.removed_at IS NULL
         LEFT JOIN song_user_meta m ON m.song_id = s.id AND m.user_id = @userId
-        LEFT JOIN song_aliases a ON a.song_id = s.id
+        LEFT JOIN song_search ss ON ss.song_id = s.id
         WHERE s.status = 'active' AND ${scopeFilter}
         GROUP BY s.id
       ), filtered AS (
         SELECT * FROM catalog WHERE (
-          @query = '' OR title LIKE @term OR artist LIKE @term OR coalesce(version, '') LIKE @term
-          OR coalesce(pinyin, '') LIKE @term
-          OR replace(coalesce(pinyin, ''), ' ', '') LIKE replace(@term, ' ', '')
-          OR coalesce(aliases, '') LIKE @term OR coalesce(lyrics, '') LIKE @term
-          OR coalesce(lyricsTranslit, '') LIKE @term OR coalesce(personalNote, '') LIKE @term
-          OR coalesce(personalMemoryCue, '') LIKE @term
+          @query = '' OR (
+            @ftsQuery <> '' AND (
+              id IN (SELECT song_id FROM song_search WHERE song_search MATCH @ftsQuery)
+              OR id IN (SELECT song_id FROM user_song_search WHERE user_id = @userId AND user_song_search MATCH @ftsQuery)
+            )
+          ) OR indexedPinyin LIKE @compactTerm
+          OR title LIKE @term OR artist LIKE @term OR coalesce(version, '') LIKE @term
+          OR coalesce(lyrics, '') LIKE @term OR coalesce(lyricsTranslit, '') LIKE @term
+          OR coalesce(personalNote, '') LIKE @term OR coalesce(personalMemoryCue, '') LIKE @term
+          OR EXISTS (SELECT 1 FROM song_aliases a WHERE a.song_id = catalog.id AND a.alias LIKE @term)
         ) AND ${advancedClauses}
       )`;
     const orderSql = `ORDER BY CASE WHEN titleInitial = '#' THEN 1 ELSE 0 END,
+      CASE WHEN @query <> '' AND (lower(title) = lower(@query) OR lower(artist) = lower(@query)) THEN 0
+        WHEN @query <> '' AND id IN (SELECT song_id FROM song_search WHERE song_search MATCH @ftsQuery) THEN 1 ELSE 2 END,
       titleInitial, pinyin COLLATE NOCASE, title COLLATE NOCASE, artist COLLATE NOCASE`;
     const rawSongs = context.db.prepare(`${queryCte} SELECT * FROM filtered ${orderSql} LIMIT @limit OFFSET @offset`).all(params) as any[];
     const total = (context.db.prepare(`${queryCte} SELECT count(*) AS count FROM filtered`).get(params) as { count: number }).count;
@@ -782,16 +805,20 @@ export async function buildApp(context: AppContext) {
       SELECT s.id, s.title, s.artist, s.version, s.language, s.genre, s.difficulty,
              s.performance_type AS performanceType, s.lyrics, s.lyrics_translit AS lyricsTranslit,
              us.collection_type AS collectionType, m.rating, m.note, m.key_shift AS keyShift,
-             m.override_diff AS personalDifficulty, m.memory_cue AS memoryCue, s.added_by AS addedBy
+             m.override_diff AS personalDifficulty, m.memory_cue AS memoryCue, s.added_by AS addedBy,
+             coalesce((SELECT json_group_array(alias) FROM song_aliases WHERE song_id = s.id), '[]') AS aliasesJson
       FROM songs s LEFT JOIN user_songs us ON us.song_id = s.id AND us.user_id = @userId AND us.removed_at IS NULL
       LEFT JOIN song_user_meta m ON m.song_id = s.id AND m.user_id = @userId
       WHERE s.id = @id AND s.status = 'active'
     `).get({ id, userId: user.id });
     if (!song) return reply.code(404).send({ code: 'NOT_FOUND', message: '没有找到这首歌。' });
+    const value = song as any;
     return {
-      ...(song as object),
+      ...value,
+      aliases: JSON.parse(value.aliasesJson ?? '[]') as string[],
+      aliasesJson: undefined,
       canEditGlobal: user.role === 'admin' || user.isMaintainer,
-      canEditLyrics: user.role === 'admin' || user.isMaintainer || (song as any).addedBy === user.id
+      canEditLyrics: user.role === 'admin' || user.isMaintainer || value.addedBy === user.id
     };
   });
 
@@ -833,7 +860,19 @@ export async function buildApp(context: AppContext) {
       titleInitial: index.titleInitial
     });
     if (!result.changes) return reply.code(404).send({ code: 'NOT_FOUND', message: '没有找到这首歌。' });
-    audit.record({ actorUserId: user.id, action: 'song_global_updated', targetType: 'song', targetId: id });
+    if (body.aliases !== undefined) {
+      context.db.prepare('DELETE FROM song_aliases WHERE song_id = ?').run(id);
+      const aliasInsert = context.db.prepare('INSERT INTO song_aliases(song_id, alias) VALUES (?, ?)');
+      for (const alias of body.aliases) aliasInsert.run(id, alias);
+    }
+    rebuildSongSearchIndex(context.db, id);
+    audit.record({
+      actorUserId: user.id,
+      action: 'song_global_updated',
+      targetType: 'song',
+      targetId: id,
+      ...(body.aliases === undefined ? {} : { metadata: { aliasCount: body.aliases.length } })
+    });
     return { ok: true };
   });
 
@@ -847,6 +886,7 @@ export async function buildApp(context: AppContext) {
       return reply.code(403).send({ code: 'FORBIDDEN', message: '只有歌曲创建者或管理员可以修改全局歌词。' });
     }
     context.db.prepare('UPDATE songs SET lyrics = ?, lyrics_translit = coalesce(?, lyrics_translit) WHERE id = ?').run(body.lyrics, body.lyricsTranslit ?? null, id);
+    rebuildSongSearchIndex(context.db, id);
     return { ok: true };
   });
 
@@ -858,8 +898,57 @@ export async function buildApp(context: AppContext) {
       INSERT INTO user_songs(user_id, song_id, collection_type, removed_at) VALUES (?, ?, ?, NULL)
       ON CONFLICT(user_id, song_id) DO UPDATE SET collection_type = excluded.collection_type, removed_at = NULL
     `).run(user.id, id, body.collectionType);
+    rebuildUserSongSearchIndex(context.db, user.id, id);
     invalidateQueues(user.id);
     return { ok: true };
+  });
+
+  /**
+   * 个人曲库批量操作必须先验证整批归属，再在一个事务中更新。
+   * 这样任意歌曲不存在、已移除或不属于当前用户时，都不会留下半套结果。
+   */
+  app.post('/api/user-songs/batch', { preHandler: requireUser }, async (request) => {
+    const user = currentUser(request);
+    const body = userSongBatchSchema.parse(request.body);
+    return context.db.transaction(() => {
+      const placeholders = body.songIds.map(() => '?').join(', ');
+      const owned = context.db.prepare(`
+        SELECT us.song_id AS songId
+        FROM user_songs us JOIN songs s ON s.id = us.song_id
+        WHERE us.user_id = ? AND us.removed_at IS NULL AND s.status = 'active'
+          AND us.song_id IN (${placeholders})
+      `).all(user.id, ...body.songIds) as Array<{ songId: number }>;
+      if (owned.length !== body.songIds.length) {
+        throw new UserSongBatchError('批量操作未保存：其中至少一首歌曲不在你的当前曲库中。');
+      }
+
+      if (body.action === 'set_collection') {
+        context.db.prepare(`UPDATE user_songs SET collection_type = ? WHERE user_id = ? AND song_id IN (${placeholders})`)
+          .run(body.collectionType!, user.id, ...body.songIds);
+      } else if (body.action === 'snooze') {
+        const upsert = context.db.prepare(`
+          INSERT INTO song_user_meta(user_id, song_id, pick_snoozed_until) VALUES (?, ?, ?)
+          ON CONFLICT(user_id, song_id) DO UPDATE SET pick_snoozed_until = excluded.pick_snoozed_until, updated_at = datetime('now')
+        `);
+        for (const songId of body.songIds) upsert.run(user.id, songId, body.until!);
+      } else if (body.action === 'unsnooze') {
+        context.db.prepare(`UPDATE song_user_meta SET pick_snoozed_until = NULL, updated_at = datetime('now') WHERE user_id = ? AND song_id IN (${placeholders})`)
+          .run(user.id, ...body.songIds);
+      } else {
+        context.db.prepare(`UPDATE user_songs SET removed_at = datetime('now') WHERE user_id = ? AND song_id IN (${placeholders})`)
+          .run(user.id, ...body.songIds);
+      }
+
+      for (const songId of body.songIds) rebuildUserSongSearchIndex(context.db, user.id, songId);
+      const invalidatedQueues = invalidateQueues(user.id);
+      audit.record({
+        actorUserId: user.id,
+        action: 'user_songs_batch_updated',
+        targetType: 'user_song_batch',
+        metadata: { action: body.action, songCount: body.songIds.length }
+      });
+      return { ok: true, updated: body.songIds.length, invalidatedQueues };
+    })();
   });
 
   /** 个人歌曲设置只更新当前用户自己的元数据，绝不能写回全局 songs 表。 */
@@ -885,6 +974,7 @@ export async function buildApp(context: AppContext) {
         note = excluded.note, memory_cue = excluded.memory_cue, updated_at = datetime('now')
     `).run(user.id, id, value('rating') ?? null, value('personalDifficulty') ?? null,
       value('keyShift') ?? null, value('note') ?? null, value('memoryCue') ?? null);
+    rebuildUserSongSearchIndex(context.db, user.id, id);
     if ('rating' in body || 'personalDifficulty' in body) invalidateQueues(user.id);
     return { ok: true };
   });
@@ -893,6 +983,7 @@ export async function buildApp(context: AppContext) {
     const user = currentUser(request);
     const { id } = idParamSchema.parse(request.params);
     context.db.prepare(`UPDATE user_songs SET removed_at = datetime('now') WHERE user_id = ? AND song_id = ?`).run(user.id, id);
+    rebuildUserSongSearchIndex(context.db, user.id, id);
     invalidateQueues(user.id);
     return { ok: true };
   });
@@ -905,6 +996,7 @@ export async function buildApp(context: AppContext) {
       INSERT INTO song_user_meta(user_id, song_id, pick_snoozed_until) VALUES (?, ?, ?)
       ON CONFLICT(user_id, song_id) DO UPDATE SET pick_snoozed_until = excluded.pick_snoozed_until, updated_at = datetime('now')
     `).run(user.id, id, body.until);
+    rebuildUserSongSearchIndex(context.db, user.id, id);
     invalidateQueues(user.id);
     return { ok: true };
   });
@@ -913,6 +1005,7 @@ export async function buildApp(context: AppContext) {
     const user = currentUser(request);
     const { id } = idParamSchema.parse(request.params);
     context.db.prepare(`UPDATE song_user_meta SET pick_snoozed_until = NULL, updated_at = datetime('now') WHERE user_id = ? AND song_id = ?`).run(user.id, id);
+    rebuildUserSongSearchIndex(context.db, user.id, id);
     invalidateQueues(user.id);
     return { ok: true };
   });
@@ -1352,6 +1445,9 @@ export async function buildApp(context: AppContext) {
     }
     if (error instanceof SetupAlreadyCompletedError) {
       return reply.code(409).send({ code: error.code, message: error.message });
+    }
+    if (error instanceof UserSongBatchError) {
+      return reply.code(error.statusCode).send({ code: error.code, message: error.message });
     }
     if (error instanceof AuditLogError) {
       app.log.error(error, '审计日志写入失败');

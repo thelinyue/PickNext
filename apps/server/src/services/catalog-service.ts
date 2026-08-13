@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import type { CollectionType } from '@picknext/shared';
 import { buildSongIndex, normalizedSongIdentity, similarityScore, type SongIdentityInput } from '../song-utils.js';
+import { rebuildSongSearchIndex, rebuildUserSongSearchIndex } from '../search-index.js';
 
 export interface CatalogCandidate extends SongIdentityInput {
   id: number;
@@ -69,6 +70,7 @@ export class CatalogService {
         note = coalesce(excluded.note, note), memory_cue = coalesce(excluded.memory_cue, memory_cue),
         key_shift = coalesce(excluded.key_shift, key_shift), updated_at = datetime('now')
     `).run(userId, songId, personal.personalDifficulty ?? null, personal.note ?? null, personal.memoryCue ?? null, personal.keyShift ?? null);
+    rebuildUserSongSearchIndex(this.db, userId, songId);
     return true;
   }
 
@@ -82,6 +84,8 @@ export class CatalogService {
     `).run(input.title, input.artist, input.version ?? null, identity.title, identity.artist, identity.version,
       input.language ?? null, input.genre ?? null, input.difficulty ?? null, input.performanceType,
       input.lyrics ?? null, input.lyricsTranslit ?? null, index.pinyin, index.titleInitial, input.addedBy);
-    return Number(result.lastInsertRowid);
+    const songId = Number(result.lastInsertRowid);
+    rebuildSongSearchIndex(this.db, songId);
+    return songId;
   }
 }

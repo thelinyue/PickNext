@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildSongIndex, normalizedSongIdentity } from './song-utils.js';
+import { rebuildAllSearchIndexes } from './search-index.js';
 
 /**
  * SQLite 生命周期入口：统一启用外键、WAL 和迁移事务。
@@ -20,6 +21,7 @@ export class AppDatabase {
       this.backfillSongIndexes();
       this.backfillSongIdentities();
       this.ensureSongIdentityConstraint();
+      rebuildAllSearchIndexes(this.db);
     } catch (error) {
       // 启动阶段失败时主动释放句柄，避免 Windows 锁住数据库导致部署者无法备份或修复。
       this.db.close();

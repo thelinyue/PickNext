@@ -496,4 +496,46 @@ describe('核心 API 纵向闭环', () => {
     expect((database.db.prepare('SELECT count(*) AS count FROM user_songs WHERE user_id = ? AND song_id = ?').get(user.json().userId, original.json().songId) as any).count).toBe(0);
     expect((await app.inject({ method: 'GET', url: '/api/search?scope=personal&collection=learning', headers: { cookie: userCookie } })).json().total).toBe(0);
   });
+
+  it('别名搜索、个人字段隔离和个人曲库批量操作保持原子性', async () => {
+    const cookie = await setup();
+    const ownerId = (database.db.prepare("SELECT id FROM users WHERE username = 'singer'").get() as { id: number }).id;
+    const first = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie }, payload: {
+      title: '海边的歌', artist: '测试歌手', aliases: ['海边版'], collectionType: 'repertoire'
+    } });
+    const second = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie }, payload: {
+      title: '月光下的歌', artist: '另一个歌手', collectionType: 'repertoire'
+    } });
+    const firstId = first.json().songId as number;
+    const secondId = second.json().songId as number;
+
+    expect((await app.inject({ method: 'GET', url: `/api/songs/${firstId}`, headers: { cookie } })).json()).toMatchObject({ aliases: ['海边版'] });
+    expect((await app.inject({ method: 'PUT', url: `/api/songs/${firstId}`, headers: { cookie }, payload: {
+      title: '海边的歌', artist: '测试歌手', performanceType: 'solo', aliases: ['新别名']
+    } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/search?scope=global&q=新别名', headers: { cookie } })).json().songs[0]).toMatchObject({ id: firstId });
+
+    await app.inject({ method: 'PATCH', url: `/api/user-songs/${firstId}/meta`, headers: { cookie }, payload: { note: '只属于甲用户的记忆词' } });
+    const created = await app.inject({ method: 'POST', url: '/api/admin/users', headers: { cookie }, payload: { username: 'search-isolation', password: 'password123' } });
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'search-isolation', password: 'password123' } });
+    const header = login.headers['set-cookie'];
+    const otherCookie = (Array.isArray(header) ? header[0] : header)!.split(';')[0]!;
+    expect(created.statusCode).toBe(201);
+    expect((await app.inject({ method: 'GET', url: '/api/search?scope=personal&collection=repertoire&q=只属于甲用户', headers: { cookie: otherCookie } })).json().total).toBe(0);
+    expect((await app.inject({ method: 'GET', url: '/api/search?scope=personal&collection=repertoire&q=只属于甲用户', headers: { cookie } })).json().total).toBe(1);
+
+    const picked = await app.inject({ method: 'POST', url: '/api/picks', headers: { cookie }, payload: { requestId: '2ecf53c6-4e12-4b9c-9c99-35a93f7bcd22' } });
+    expect(picked.statusCode).toBe(200);
+    const invalidBatch = await app.inject({ method: 'POST', url: '/api/user-songs/batch', headers: { cookie }, payload: { action: 'remove', songIds: [firstId, 999999] } });
+    expect(invalidBatch.statusCode).toBe(404);
+    expect((database.db.prepare('SELECT removed_at FROM user_songs WHERE user_id = ? AND song_id = ?').get(ownerId, firstId) as any).removed_at).toBeNull();
+
+    const batch = await app.inject({ method: 'POST', url: '/api/user-songs/batch', headers: { cookie }, payload: { action: 'set_collection', collectionType: 'learning', songIds: [firstId, secondId] } });
+    expect(batch.statusCode).toBe(200);
+    expect(batch.json()).toMatchObject({ ok: true, updated: 2 });
+    expect(database.db.prepare('SELECT collection_type FROM user_songs WHERE user_id = ? AND song_id IN (?, ?) ORDER BY song_id').all(ownerId, firstId, secondId)).toEqual([
+      { collection_type: 'learning' }, { collection_type: 'learning' }
+    ]);
+    expect((database.db.prepare("SELECT count(*) AS count FROM pick_queue_items WHERE status = 'pending'").get() as any).count).toBe(0);
+  });
 });

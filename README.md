@@ -70,10 +70,10 @@ docker compose exec picknext node apps/server/dist/backup.js check /data/picknex
 
 恢复前先停止服务，将经过检查的数据库文件放回 `./data/picknext.db`，然后重新启动容器。迁移使用追加式 SQL；迁移失败时保留原数据库文件和备份，不要删除 `-wal` 或 `-shm` 文件后强行启动。备份命令使用 SQLite 原生 backup API，恢复检查使用只读 `integrity_check`，不会修改线上数据库。
 
-v0.1.3 镜像发布在 GitHub Container Registry，仅提供 `linux/amd64`：
+v0.2.0 镜像发布在 GitHub Container Registry，仅提供 `linux/amd64`：
 
 ```text
-ghcr.io/thelinyue/picknext:0.1.3
+ghcr.io/thelinyue/picknext:0.2.0
 ```
 
 在部署目录创建 `docker-compose.yml`：
@@ -81,7 +81,7 @@ ghcr.io/thelinyue/picknext:0.1.3
 ```yaml
 services:
   picknext:
-    image: ghcr.io/thelinyue/picknext:0.1.3
+    image: ghcr.io/thelinyue/picknext:0.2.0
     ports:
       - "5560:5560"
     environment:
