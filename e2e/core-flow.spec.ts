@@ -50,8 +50,18 @@ test.describe.serial('PickNext v1.0 移动端核心闭环', () => {
 
     await page.getByRole('button', { name: '曲库', exact: true }).click();
     await page.locator('header').getByRole('button', { name: '添加歌曲' }).click();
+    const globalOnlySheet = page.getByRole('dialog', { name: '收一首歌' });
+    await globalOnlySheet.getByLabel('个人归属').selectOption({ label: '仅维护全局资料，不收录到我的个人曲库' });
+    await globalOnlySheet.getByLabel('歌名').fill('全局维护歌曲');
+    await globalOnlySheet.getByLabel('歌手').fill('维护歌手');
+    await globalOnlySheet.getByRole('button', { name: '收进曲库' }).click();
+    await page.getByRole('tab', { name: /全部曲库/ }).click();
+    await expect(page.getByText('全局维护歌曲')).toBeVisible();
+    await expect(page.locator('.collection-badge.uncollected')).toHaveText('未收录');
+    await page.getByRole('tab', { name: /我的曲库/ }).click();
+    await page.locator('header').getByRole('button', { name: '添加歌曲' }).click();
     await page.getByLabel('演唱类型').selectOption('solo');
-    await page.getByLabel('先放到').selectOption('repertoire');
+    await page.getByLabel('个人归属').selectOption('repertoire');
     await page.getByLabel('歌名').fill('晴天');
     await page.getByLabel('歌手').fill('周杰伦');
     await page.getByRole('button', { name: '收进曲库' }).click();
@@ -86,7 +96,7 @@ test.describe.serial('PickNext v1.0 移动端核心闭环', () => {
     });
     await page.getByRole('tab', { name: /全部曲库/ }).click();
     await expect(page.getByText('海阔天空')).toBeVisible();
-    await page.getByRole('button', { name: '＋ 收录' }).click();
+    await page.getByRole('button', { name: '查看海阔天空详情' }).click();
     await page.getByRole('button', { name: '加入会唱曲库' }).click();
 
     await page.getByRole('button', { name: '开始 Pick' }).click();
@@ -149,7 +159,7 @@ test.describe.serial('PickNext v1.0 移动端核心闭环', () => {
     await page.locator('header').getByRole('button', { name: '添加歌曲' }).click();
     await page.getByRole('textbox', { name: '歌名', exact: true }).fill('普通用户的歌');
     await page.getByLabel('歌手').fill('测试歌手');
-    await page.getByLabel('先放到').selectOption('repertoire');
+    await page.getByLabel('个人归属').selectOption('repertoire');
     await page.getByRole('button', { name: '收进曲库' }).click();
     await expect(page.getByText('普通用户的歌')).toBeVisible();
     expect(await page.evaluate(() => fetch('/api/songs/1', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: '越权', artist: '测试', performanceType: 'solo' }) }).then((response) => response.status))).toBe(403);

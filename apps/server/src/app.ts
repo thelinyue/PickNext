@@ -21,10 +21,12 @@ import {
   createPlaylistSchema,
   createSongSchema,
   importSchema,
+  importTaskSchema,
   loginSchema,
   notePickSchema,
   pickContextResponseSchema,
   pickRequestSchema,
+  pickResponseSchema,
   registrationSettingSchema,
   reorderPlaylistSchema,
   reviewDecisionSchema,
@@ -36,38 +38,24 @@ import {
   updateSongSchema
 } from '@picknext/shared';
 import { hashPassword, verifyPassword } from './auth.js';
+import { AuditLogError, AuditLogger } from './audit.js';
+import { ImportTaskQueue } from './import-task-queue.js';
+import { LoginRateLimiter } from './login-rate-limit.js';
 import { PickError, PickService } from './pick-service.js';
-import { buildSongIndex, similarityScore, songIdentityKey, type SongIdentityInput } from './song-utils.js';
+import { buildSongIndex, normalizedSongIdentity } from './song-utils.js';
+import { CatalogService, type CatalogCandidate } from './services/catalog-service.js';
 import type { AppContext, UserPayload } from './types.js';
 
 const idParamSchema = z.object({ id: z.coerce.number().int().positive() });
 const eventParamSchema = z.object({ eventId: z.string().uuid() });
 const taskParamSchema = z.object({ id: z.string().uuid() });
 
-interface CandidateSong extends SongIdentityInput {
-  id: number;
-  language: string | null;
-  genre: string | null;
-  difficulty: 'easy' | 'medium' | 'hard' | null;
-  performanceType: 'solo' | 'duet' | 'chorus';
-}
+class SetupAlreadyCompletedError extends Error {
+  readonly code = 'ALREADY_SETUP';
 
-function songCandidates(db: AppContext['db'], input: SongIdentityInput) {
-  const songs = db.prepare(`
-    SELECT id, title, artist, version, language, genre, difficulty,
-           performance_type AS performanceType
-    FROM songs WHERE status = 'active'
-  `).all() as CandidateSong[];
-  const key = songIdentityKey(input);
-  const exact = songs.find((song) => songIdentityKey(song) === key);
-  const similar = songs
-    .filter((song) => song.id !== exact?.id)
-    .map((song) => ({ song, score: similarityScore(input, song) }))
-    .filter((item) => item.score >= 3)
-    .sort((left, right) => right.score - left.score || left.song.id - right.song.id)
-    .slice(0, 5)
-    .map((item) => item.song);
-  return { exact, similar };
+  constructor() {
+    super('系统已经完成初始化。');
+  }
 }
 
 function currentUser(request: FastifyRequest): UserPayload {
@@ -95,22 +83,88 @@ function getOrCreateSessionSecret(db: AppContext['db']): string {
   const existing = db.prepare("SELECT value FROM app_settings WHERE key = 'session_secret'").get() as { value: string } | undefined;
   if (existing?.value) return existing.value;
   const generated = randomBytes(32).toString('hex');
-  db.prepare(`
-    INSERT INTO app_settings(key, value, updated_at) VALUES ('session_secret', ?, datetime('now'))
-    ON CONFLICT(key) DO NOTHING
-  `).run(generated);
-  const stored = db.prepare("SELECT value FROM app_settings WHERE key = 'session_secret'").get() as { value: string } | undefined;
-  if (!stored?.value) throw new Error('无法生成会话安全密钥，请检查 SQLite 数据库写入权限。');
-  return stored.value;
+  const userCount = (db.prepare('SELECT count(*) AS count FROM users WHERE is_system = 0').get() as { count: number }).count;
+  if (userCount > 0) {
+    db.prepare(`
+      INSERT INTO app_settings(key, value, updated_at) VALUES ('session_secret', ?, datetime('now'))
+      ON CONFLICT(key) DO NOTHING
+    `).run(generated);
+    const stored = db.prepare("SELECT value FROM app_settings WHERE key = 'session_secret'").get() as { value: string } | undefined;
+    if (!stored?.value) throw new Error('无法生成会话安全密钥，请检查 SQLite 数据库写入权限。');
+    return stored.value;
+  }
+  // 初次初始化前只在应用实例内暂存；真正落库由 setup 的账号/歌单事务完成。
+  return generated;
 }
 
 /** Fastify 应用工厂保持无全局状态，测试可用 inject() 连接独立内存数据库。 */
 export async function buildApp(context: AppContext) {
   const app = Fastify({ logger: process.env.NODE_ENV !== 'test' });
   const pickService = new PickService(context.db);
+  const catalog = new CatalogService(context.db);
+  const audit = new AuditLogger(context.db);
+  const loginLimiter = new LoginRateLimiter();
+  const sessionSecret = getOrCreateSessionSecret(context.db);
+  const invalidateQueues = (userId: number) => context.db.prepare(`
+    UPDATE pick_queue_items SET status = 'invalidated' WHERE status = 'pending' AND session_id IN (
+      SELECT id FROM pick_sessions WHERE user_id = ? AND ended_at IS NULL
+    )
+  `).run(userId);
+  const processImportTask = async (taskId: string): Promise<void> => {
+    const task = context.db.prepare('SELECT user_id AS userId, payload, status FROM tasks WHERE id = ? AND type = \'song_import\'').get(taskId) as {
+      userId: number;
+      payload: string;
+      status: string;
+    } | undefined;
+    if (!task || task.status === 'cancelled') return;
+    const started = context.db.prepare(`
+      UPDATE tasks SET status = 'running', updated_at = datetime('now')
+      WHERE id = ? AND status = 'pending'
+    `).run(taskId);
+    if (!started.changes) return;
+    try {
+      const body = importSchema.parse(JSON.parse(task.payload));
+      const entries = parseImport(body.format, body.content);
+      let imported = 0;
+      let reused = 0;
+      const needsConfirmation: ImportEntry[] = [];
+      for (const entry of entries) {
+        const current = context.db.prepare('SELECT status FROM tasks WHERE id = ?').get(taskId) as { status: string } | undefined;
+        if (current?.status === 'cancelled') return;
+        context.db.transaction(() => {
+          const matches = catalog.findCandidates(entry);
+          if (matches.exact) {
+            catalog.collectUserSong(task.userId, matches.exact.id, { collectionType: body.collectionType });
+            reused += 1;
+            return;
+          }
+          if (matches.similar.length) {
+            needsConfirmation.push(entry);
+            return;
+          }
+          const songId = catalog.createSong({ ...entry, performanceType: 'solo', addedBy: task.userId });
+          catalog.collectUserSong(task.userId, songId, { collectionType: body.collectionType });
+          imported += 1;
+        })();
+        if (body.collectionType) invalidateQueues(task.userId);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      context.db.prepare(`
+        UPDATE tasks SET status = 'done', result = ?, error = NULL, updated_at = datetime('now')
+        WHERE id = ? AND status = 'running'
+      `).run(JSON.stringify({ imported, reused, needsConfirmation }), taskId);
+      audit.record({ actorUserId: task.userId, action: 'song_import_completed', targetType: 'task', targetId: taskId, metadata: { imported, reused } });
+    } catch (error) {
+      context.db.prepare(`
+        UPDATE tasks SET status = 'failed', error = ?, updated_at = datetime('now')
+        WHERE id = ? AND status <> 'cancelled'
+      `).run(error instanceof Error ? error.message : '导入失败', taskId);
+    }
+  };
+  const importQueue = new ImportTaskQueue(context.db, { processTask: processImportTask });
   await app.register(cookie);
   await app.register(jwt, {
-    secret: getOrCreateSessionSecret(context.db),
+    secret: sessionSecret,
     cookie: { cookieName: 'picknext_session', signed: false }
   });
 
@@ -188,27 +242,51 @@ export async function buildApp(context: AppContext) {
 
   app.post('/api/setup', async (request, reply) => {
     const body = setupSchema.parse(request.body);
-    if ((context.db.prepare('SELECT count(*) AS count FROM users WHERE is_system = 0').get() as { count: number }).count > 0) {
-      return reply.code(409).send({ code: 'ALREADY_SETUP', message: '系统已经完成初始化。' });
+    const passwordHash = await hashPassword(body.password);
+    let user: UserPayload;
+    try {
+      user = context.db.transaction(() => {
+        if ((context.db.prepare('SELECT count(*) AS count FROM users WHERE is_system = 0').get() as { count: number }).count > 0) {
+          throw new SetupAlreadyCompletedError();
+        }
+        const result = context.db.prepare(`
+          INSERT INTO users(username, password_hash, role, last_login_at) VALUES (?, ?, 'admin', datetime('now'))
+        `).run(body.username, passwordHash);
+        const created: UserPayload = { id: Number(result.lastInsertRowid), username: body.username, role: 'admin', isMaintainer: false, canAddSongs: true };
+        context.db.prepare(`INSERT INTO playlists(owner_id, name, kind) VALUES (?, '下一次 KTV', 'next_ktv')`).run(created.id);
+        context.db.prepare(`
+          INSERT INTO app_settings(key, value, updated_at) VALUES ('session_secret', ?, datetime('now'))
+          ON CONFLICT(key) DO NOTHING
+        `).run(sessionSecret);
+        audit.record({ actorUserId: created.id, action: 'setup_completed', targetType: 'system' });
+        return created;
+      })();
+    } catch (error) {
+      if (error instanceof SetupAlreadyCompletedError) return reply.code(409).send({ code: error.code, message: error.message });
+      throw error;
     }
-    const result = context.db.prepare(`
-      INSERT INTO users(username, password_hash, role, last_login_at) VALUES (?, ?, 'admin', datetime('now'))
-    `).run(body.username, await hashPassword(body.password));
-    const user: UserPayload = { id: Number(result.lastInsertRowid), username: body.username, role: 'admin', isMaintainer: false, canAddSongs: true };
-    context.db.prepare(`INSERT INTO playlists(owner_id, name, kind) VALUES (?, '下一次 KTV', 'next_ktv')`).run(user.id);
     await issueSession(request, reply, user);
     return { user };
   });
 
   app.post('/api/auth/login', async (request, reply) => {
     const body = loginSchema.parse(request.body);
+    const loginKey = `${request.ip}|${body.username.trim().toLocaleLowerCase('zh-CN')}`;
+    const rate = loginLimiter.check(loginKey);
+    if (!rate.allowed) {
+      reply.header('retry-after', rate.retryAfterSeconds);
+      return reply.code(429).send({ code: 'RATE_LIMITED', message: `登录失败次数过多，请 ${rate.retryAfterSeconds} 秒后重试。` });
+    }
     const row = context.db.prepare(`
       SELECT id, username, role, password_hash, is_maintainer, can_add_songs
       FROM users WHERE username = ? COLLATE NOCASE AND is_system = 0
     `).get(body.username) as any;
     if (!row || !(await verifyPassword(body.password, row.password_hash))) {
+      loginLimiter.failed(loginKey);
+      try { audit.record({ action: 'login_failed', targetType: 'user', metadata: { username: body.username } }); } catch (error) { app.log.error(error, '登录失败审计日志写入失败'); }
       return reply.code(401).send({ code: 'INVALID_CREDENTIALS', message: '用户名或密码不正确。' });
     }
+    loginLimiter.succeeded(loginKey);
     const user: UserPayload = {
       id: row.id,
       username: row.username,
@@ -217,6 +295,7 @@ export async function buildApp(context: AppContext) {
       canAddSongs: Boolean(row.can_add_songs)
     };
     context.db.prepare("UPDATE users SET last_login_at = datetime('now') WHERE id = ?").run(user.id);
+    audit.record({ actorUserId: user.id, action: 'login_succeeded', targetType: 'user', targetId: user.id });
     await issueSession(request, reply, user);
     return { user };
   });
@@ -391,6 +470,7 @@ export async function buildApp(context: AppContext) {
       body.canAddSongs === undefined ? null : body.canAddSongs ? 1 : 0,
       ...body.userIds
     );
+    audit.record({ actorUserId: currentUser(request).id, action: 'user_permissions_updated', targetType: 'user_batch', metadata: { userIds: body.userIds, updated: result.changes } });
     return { ok: true, updated: result.changes };
   });
 
@@ -406,6 +486,7 @@ export async function buildApp(context: AppContext) {
     const body = adminBulkDeletionSchema.parse(request.body);
     const result = await permanentlyDeleteUsers(currentUser(request), body.userIds, body.adminPassword);
     if ('error' in result) return reply.code(result.error.status as 403 | 404 | 409).send({ code: result.error.code, message: result.error.message });
+    audit.record({ actorUserId: currentUser(request).id, action: 'users_deleted', targetType: 'user_batch', metadata: { userIds: body.userIds } });
     return { ok: true, deleted: result.impact.userCount, impact: result.impact };
   });
 
@@ -436,6 +517,7 @@ export async function buildApp(context: AppContext) {
     const body = adminDeletionSchema.parse(request.body);
     const result = await permanentlyDeleteUsers(currentUser(request), [id], body.adminPassword);
     if ('error' in result) return reply.code(result.error.status as 403 | 404 | 409).send({ code: result.error.code, message: result.error.message });
+    audit.record({ actorUserId: currentUser(request).id, action: 'user_deleted', targetType: 'user', targetId: id });
     return { ok: true, deleted: 1, impact: result.impact };
   });
 
@@ -473,8 +555,8 @@ export async function buildApp(context: AppContext) {
   app.post('/api/songs', { preHandler: requireUser }, async (request, reply) => {
     const user = currentUser(request);
     const body = createSongSchema.parse(request.body);
-    const matches = songCandidates(context.db, body);
-    const publicCandidate = (song: CandidateSong) => ({
+    const matches = catalog.findCandidates(body);
+    const publicCandidate = (song: CatalogCandidate) => ({
       id: song.id, title: song.title, artist: song.artist, version: song.version,
       language: song.language, genre: song.genre, difficulty: song.difficulty,
       performanceType: song.performanceType
@@ -534,33 +616,12 @@ export async function buildApp(context: AppContext) {
         songId = reusable.id;
         status = 'reused';
       } else {
-        const index = buildSongIndex(body.title);
-        const inserted = context.db.prepare(`
-          INSERT INTO songs(title, artist, version, language, genre, difficulty, performance_type,
-                            lyrics, lyrics_translit, pinyin, title_initial, added_by)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          body.title, body.artist, body.version ?? null, body.language ?? null, body.genre ?? null,
-          body.difficulty ?? null, body.performanceType, body.lyrics ?? null, body.lyricsTranslit ?? null,
-          index.pinyin, index.titleInitial, user.id
-        );
-        songId = Number(inserted.lastInsertRowid);
+        songId = catalog.createSong({ ...body, addedBy: user.id });
         status = 'created';
         const aliasInsert = context.db.prepare('INSERT INTO song_aliases(song_id, alias) VALUES (?, ?)');
         for (const alias of body.aliases) aliasInsert.run(songId, alias);
       }
-      context.db.prepare(`
-        INSERT INTO user_songs(user_id, song_id, collection_type, removed_at) VALUES (?, ?, ?, NULL)
-        ON CONFLICT(user_id, song_id) DO UPDATE SET collection_type = excluded.collection_type, removed_at = NULL
-      `).run(user.id, songId, body.collectionType);
-      context.db.prepare(`
-        INSERT INTO song_user_meta(user_id, song_id, override_diff, note, memory_cue, key_shift)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(user_id, song_id) DO UPDATE SET
-          override_diff = coalesce(excluded.override_diff, override_diff),
-          note = coalesce(excluded.note, note), memory_cue = coalesce(excluded.memory_cue, memory_cue),
-          key_shift = coalesce(excluded.key_shift, key_shift), updated_at = datetime('now')
-      `).run(user.id, songId, personalPayload.personalDifficulty, personalPayload.note, personalPayload.memoryCue, personalPayload.keyShift);
+      catalog.collectUserSong(user.id, songId, personalPayload);
       return { songId, status };
     })();
     return reply.code(result.status === 'created' ? 201 : 200).send(result);
@@ -746,8 +807,10 @@ export async function buildApp(context: AppContext) {
     const { id } = idParamSchema.parse(request.params);
     const body = updateSongSchema.parse(request.body);
     const index = buildSongIndex(body.title);
+    const identity = normalizedSongIdentity(body);
     const result = context.db.prepare(`
       UPDATE songs SET title = @title, artist = @artist, version = @version,
+        normalized_title = @normalizedTitle, normalized_artist = @normalizedArtist, normalized_version = @normalizedVersion,
         language = @language, genre = @genre, difficulty = @difficulty,
         performance_type = @performanceType, lyrics = @lyrics,
         lyrics_translit = @lyricsTranslit, pinyin = @pinyin, title_initial = @titleInitial
@@ -757,6 +820,9 @@ export async function buildApp(context: AppContext) {
       title: body.title,
       artist: body.artist,
       version: body.version || null,
+      normalizedTitle: identity.title,
+      normalizedArtist: identity.artist,
+      normalizedVersion: identity.version,
       language: body.language || null,
       genre: body.genre || null,
       difficulty: body.difficulty ?? null,
@@ -767,6 +833,7 @@ export async function buildApp(context: AppContext) {
       titleInitial: index.titleInitial
     });
     if (!result.changes) return reply.code(404).send({ code: 'NOT_FOUND', message: '没有找到这首歌。' });
+    audit.record({ actorUserId: user.id, action: 'song_global_updated', targetType: 'song', targetId: id });
     return { ok: true };
   });
 
@@ -782,12 +849,6 @@ export async function buildApp(context: AppContext) {
     context.db.prepare('UPDATE songs SET lyrics = ?, lyrics_translit = coalesce(?, lyrics_translit) WHERE id = ?').run(body.lyrics, body.lyricsTranslit ?? null, id);
     return { ok: true };
   });
-
-  const invalidateQueues = (userId: number) => context.db.prepare(`
-    UPDATE pick_queue_items SET status = 'invalidated' WHERE status = 'pending' AND session_id IN (
-      SELECT id FROM pick_sessions WHERE user_id = ? AND ended_at IS NULL
-    )
-  `).run(userId);
 
   app.put('/api/user-songs/:id/collection', { preHandler: requireUser }, async (request) => {
     const user = currentUser(request);
@@ -857,7 +918,7 @@ export async function buildApp(context: AppContext) {
   });
 
   app.post('/api/picks', { preHandler: requireUser }, async (request) =>
-    pickService.pick(currentUser(request).id, pickRequestSchema.parse(request.body))
+    pickResponseSchema.parse(pickService.pick(currentUser(request).id, pickRequestSchema.parse(request.body)))
   );
 
   app.get('/api/picks/context', { preHandler: requireUser }, async (request) =>
@@ -1188,19 +1249,9 @@ export async function buildApp(context: AppContext) {
 
   const collectSubmissionSong = (submission: any, songId: number) => {
     const personal = JSON.parse(submission.personal_payload) as any;
-    context.db.prepare(`
-      INSERT INTO user_songs(user_id, song_id, collection_type, removed_at) VALUES (?, ?, ?, NULL)
-      ON CONFLICT(user_id, song_id) DO UPDATE SET collection_type = excluded.collection_type, removed_at = NULL
-    `).run(submission.submitted_by, songId, personal.collectionType);
-    context.db.prepare(`
-      INSERT INTO song_user_meta(user_id, song_id, override_diff, key_shift, note, memory_cue)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(user_id, song_id) DO UPDATE SET override_diff = coalesce(excluded.override_diff, override_diff),
-        key_shift = coalesce(excluded.key_shift, key_shift), note = coalesce(excluded.note, note),
-        memory_cue = coalesce(excluded.memory_cue, memory_cue), updated_at = datetime('now')
-    `).run(submission.submitted_by, songId, personal.personalDifficulty ?? null, personal.keyShift ?? null,
-      personal.note ?? null, personal.memoryCue ?? null);
-    invalidateQueues(submission.submitted_by);
+    if (catalog.collectUserSong(submission.submitted_by, songId, personal)) {
+      invalidateQueues(submission.submitted_by);
+    }
   };
 
   app.post('/api/reviews/:id/merge', { preHandler: requireReviewer }, async (request, reply) => {
@@ -1217,6 +1268,7 @@ export async function buildApp(context: AppContext) {
         .run(reviewer.id, body.reviewNote ?? null, id);
       if (!changed.changes) return reply.code(409).send({ code: 'REVIEW_ALREADY_RESOLVED', message: '这条审核已被其他人处理。' });
       collectSubmissionSong(submission, submission.matched_song_id);
+      audit.record({ actorUserId: reviewer.id, action: 'song_review_merged', targetType: 'submission', targetId: id, metadata: { songId: submission.matched_song_id } });
       return { ok: true, songId: submission.matched_song_id };
     })();
   });
@@ -1224,7 +1276,7 @@ export async function buildApp(context: AppContext) {
   app.post('/api/reviews/:id/approve', { preHandler: requireReviewer }, async (request, reply) => {
     const reviewer = currentUser(request); const { id } = idParamSchema.parse(request.params);
     const body = approveReviewSchema.parse(request.body);
-    if (songCandidates(context.db, body).exact) {
+    if (catalog.findCandidates(body).exact) {
       return reply.code(409).send({ code: 'DUPLICATE_IDENTITY', message: '批准为独立版本前，请修改版本或歌曲身份。' });
     }
     return context.db.transaction(() => {
@@ -1234,17 +1286,10 @@ export async function buildApp(context: AppContext) {
         review_note = ?, reviewed_at = datetime('now') WHERE id = ? AND status = 'pending'`)
         .run(reviewer.id, body.reviewNote ?? null, id);
       if (!changed.changes) return reply.code(409).send({ code: 'REVIEW_ALREADY_RESOLVED', message: '这条审核已被其他人处理。' });
-      const index = buildSongIndex(body.title);
-      const created = context.db.prepare(`
-        INSERT INTO songs(title, artist, version, language, genre, difficulty, performance_type,
-          lyrics, lyrics_translit, pinyin, title_initial, added_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(body.title, body.artist, body.version ?? null, body.language ?? null, body.genre ?? null,
-        body.difficulty ?? null, body.performanceType, body.lyrics ?? null, body.lyricsTranslit ?? null,
-        index.pinyin, index.titleInitial, reviewer.id);
-      const songId = Number(created.lastInsertRowid);
+      const songId = catalog.createSong({ ...body, addedBy: reviewer.id });
       context.db.prepare('UPDATE song_submissions SET resolved_song_id = ? WHERE id = ?').run(songId, id);
-      collectSubmissionSong(submission, songId);
+       collectSubmissionSong(submission, songId);
+      audit.record({ actorUserId: reviewer.id, action: 'song_review_approved', targetType: 'submission', targetId: id, metadata: { songId } });
       return { ok: true, songId };
     })();
   });
@@ -1256,6 +1301,7 @@ export async function buildApp(context: AppContext) {
       review_note = ?, reviewed_at = datetime('now') WHERE id = ? AND status = 'pending'`)
       .run(reviewer.id, body.reviewNote ?? null, id);
     if (!result.changes) return reply.code(409).send({ code: 'REVIEW_ALREADY_RESOLVED', message: '这条审核已被其他人处理。' });
+    audit.record({ actorUserId: reviewer.id, action: 'song_review_rejected', targetType: 'submission', targetId: id });
     return { ok: true };
   });
 
@@ -1264,35 +1310,9 @@ export async function buildApp(context: AppContext) {
     if (!user.canAddSongs) return reply.code(403).send({ code: 'FORBIDDEN', message: '管理员已关闭你的歌曲添加权限。' });
     const body = importSchema.parse(request.body);
     const taskId = randomUUID();
-    context.db.prepare(`INSERT INTO tasks(id, user_id, type, payload, status) VALUES (?, ?, 'song_import', ?, 'running')`).run(taskId, user.id, JSON.stringify(body));
-    try {
-      const entries = parseImport(body.format, body.content);
-      const insertSong = context.db.prepare(`
-        INSERT INTO songs(title, artist, version, pinyin, title_initial, added_by) VALUES (?, ?, ?, ?, ?, ?)
-      `);
-      const collect = context.db.prepare(`
-        INSERT INTO user_songs(user_id, song_id, collection_type, removed_at) VALUES (?, ?, ?, NULL)
-        ON CONFLICT(user_id, song_id) DO UPDATE SET collection_type = excluded.collection_type, removed_at = NULL
-      `);
-      let imported = 0; let reused = 0;
-      const needsConfirmation: ImportEntry[] = [];
-      context.db.transaction(() => {
-        for (const entry of entries) {
-          const matches = songCandidates(context.db, entry);
-          if (matches.exact) {
-            collect.run(user.id, matches.exact.id, body.collectionType); reused += 1; continue;
-          }
-          if (matches.similar.length) { needsConfirmation.push(entry); continue; }
-          const index = buildSongIndex(entry.title);
-          const inserted = insertSong.run(entry.title, entry.artist, entry.version ?? null, index.pinyin, index.titleInitial, user.id);
-          collect.run(user.id, Number(inserted.lastInsertRowid), body.collectionType); imported += 1;
-        }
-      })();
-      context.db.prepare(`UPDATE tasks SET status = 'done', result = ?, updated_at = datetime('now') WHERE id = ?`)
-        .run(JSON.stringify({ imported, reused, needsConfirmation }), taskId);
-    } catch (error) {
-      context.db.prepare(`UPDATE tasks SET status = 'failed', error = ?, updated_at = datetime('now') WHERE id = ?`).run(error instanceof Error ? error.message : '导入失败', taskId);
-    }
+    context.db.prepare(`INSERT INTO tasks(id, user_id, type, payload, status) VALUES (?, ?, 'song_import', ?, 'pending')`).run(taskId, user.id, JSON.stringify(body));
+    importQueue.enqueue(taskId);
+    audit.record({ actorUserId: user.id, action: 'song_import_created', targetType: 'task', targetId: taskId });
     return reply.code(202).send({ taskId });
   });
 
@@ -1300,14 +1320,15 @@ export async function buildApp(context: AppContext) {
     const user = currentUser(request);
     const { id } = taskParamSchema.parse(request.params);
     const task = context.db.prepare(`SELECT id, type, status, result, error, created_at AS createdAt, updated_at AS updatedAt FROM tasks WHERE id = ? AND user_id = ?`).get(id, user.id);
-    return task ?? reply.code(404).send({ code: 'NOT_FOUND', message: '没有找到这个导入任务。' });
+    if (!task) return reply.code(404).send({ code: 'NOT_FOUND', message: '没有找到这个导入任务。' });
+    return importTaskSchema.parse(task);
   });
 
   app.post('/api/tasks/:id/cancel', { preHandler: requireUser }, async (request) => {
     const user = currentUser(request);
     const { id } = taskParamSchema.parse(request.params);
-    context.db.prepare(`UPDATE tasks SET status = 'cancelled', updated_at = datetime('now') WHERE id = ? AND user_id = ? AND status = 'pending'`).run(id, user.id);
-    return { ok: true };
+    const cancelled = importQueue.cancel(id, user.id);
+    return { ok: true, cancelled };
   });
 
   app.get('/api/export', { preHandler: requireUser }, async (request) => {
@@ -1329,7 +1350,18 @@ export async function buildApp(context: AppContext) {
     if (error instanceof ZodError) {
       return reply.code(400).send({ code: 'INVALID_INPUT', message: '提交的数据格式不正确。', details: error.issues });
     }
+    if (error instanceof SetupAlreadyCompletedError) {
+      return reply.code(409).send({ code: error.code, message: error.message });
+    }
+    if (error instanceof AuditLogError) {
+      app.log.error(error, '审计日志写入失败');
+      return reply.code(500).send({ code: error.code, message: error.message });
+    }
     if (error instanceof PickError) return reply.code(error.statusCode).send({ code: error.code, message: error.message });
+    const errorCode = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+    if (errorCode === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return reply.code(409).send({ code: 'DUPLICATE_IDENTITY', message: '歌曲身份与现有活动歌曲重复，请修改歌名、歌手或版本。' });
+    }
     app.log.error(error, '请求处理失败');
     return reply.code(500).send({ code: 'INTERNAL_ERROR', message: '服务暂时遇到问题，请稍后重试。' });
   });

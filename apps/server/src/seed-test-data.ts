@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AppDatabase } from './db.js';
 import { hashPassword } from './auth.js';
-import { buildSongIndex } from './song-utils.js';
+import { buildSongIndex, normalizedSongIdentity } from './song-utils.js';
 
 const TEST_PASSWORD = 'PickNext123!';
 const accountDefinitions = [
@@ -90,8 +90,9 @@ async function main() {
 
     const adminId = userIds.get('admin_demo')!;
     const upsertSong = database.db.prepare(`
-      INSERT INTO songs(title, artist, language, genre, difficulty, performance_type, version, pinyin, title_initial, added_by)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO songs(title, artist, language, genre, difficulty, performance_type, version,
+        normalized_title, normalized_artist, normalized_version, pinyin, title_initial, added_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const songIds: number[] = [];
     for (const [title, artist, language, genre, difficulty, performanceType, version] of songDefinitions) {
@@ -101,7 +102,9 @@ async function main() {
       `).get(title, artist, version) as { id: number } | undefined;
       if (!song) {
         const index = buildSongIndex(title);
-        const result = upsertSong.run(title, artist, language, genre, difficulty, performanceType, version, index.pinyin, index.titleInitial, adminId);
+        const normalized = normalizedSongIdentity({ title, artist, version });
+        const result = upsertSong.run(title, artist, language, genre, difficulty, performanceType, version,
+          normalized.title, normalized.artist, normalized.version, index.pinyin, index.titleInitial, adminId);
         song = { id: Number(result.lastInsertRowid) };
       }
       songIds.push(song.id);

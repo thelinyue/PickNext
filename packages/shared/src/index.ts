@@ -211,7 +211,8 @@ export const createSongSchema = z.object({
   lyrics: z.string().max(200_000).optional(),
   lyricsTranslit: z.string().max(200_000).optional(),
   aliases: z.array(z.string().trim().min(1).max(120)).max(20).default([]),
-  collectionType: collectionTypeSchema.default('learning'),
+  // 未传值时保持历史默认进入待学；显式传 null 表示只维护全局歌曲，不收录到个人曲库。
+  collectionType: collectionTypeSchema.nullable().optional().default('learning'),
   personalDifficulty: difficultySchema.nullable().optional(),
   note: z.string().trim().max(1000).optional(),
   memoryCue: z.string().trim().max(500).optional(),
@@ -342,8 +343,20 @@ export interface UserDeletionImpact {
 export const importSchema = z.object({
   format: z.enum(['json', 'csv', 'text']),
   content: z.string().min(1).max(2_000_000),
-  collectionType: collectionTypeSchema.default('learning')
+  // 批量导入同样允许只创建全局歌曲，未传值仍兼容原有待学默认。
+  collectionType: collectionTypeSchema.nullable().optional().default('learning')
 });
+export const importTaskStatusSchema = z.enum(['pending', 'running', 'done', 'failed', 'cancelled']);
+export const importTaskSchema = z.object({
+  id: z.string().uuid(),
+  type: z.literal('song_import'),
+  status: importTaskStatusSchema,
+  result: z.string().nullable(),
+  error: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string()
+});
+export type ImportTask = z.infer<typeof importTaskSchema>;
 
 export const createPlaylistSchema = z.object({
   name: z.string().trim().min(1).max(80),

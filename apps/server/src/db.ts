@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildSongIndex } from './song-utils.js';
+import { buildSongIndex, normalizedSongIdentity } from './song-utils.js';
 
 /**
  * SQLite 生命周期入口：统一启用外键、WAL 和迁移事务。
@@ -12,11 +12,19 @@ export class AppDatabase {
 
   constructor(filename: string, migrationsDirectory: string) {
     this.db = new Database(filename);
-    this.db.pragma('foreign_keys = ON');
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('busy_timeout = 5000');
-    this.migrate(migrationsDirectory);
-    this.backfillSongIndexes();
+    try {
+      this.db.pragma('foreign_keys = ON');
+      this.db.pragma('journal_mode = WAL');
+      this.db.pragma('busy_timeout = 5000');
+      this.migrate(migrationsDirectory);
+      this.backfillSongIndexes();
+      this.backfillSongIdentities();
+      this.ensureSongIdentityConstraint();
+    } catch (error) {
+      // 启动阶段失败时主动释放句柄，避免 Windows 锁住数据库导致部署者无法备份或修复。
+      this.db.close();
+      throw error;
+    }
   }
 
   /**
@@ -38,6 +46,58 @@ export class AppDatabase {
     } catch (error) {
       throw new Error(`歌曲拼音索引回填失败：${error instanceof Error ? error.message : '未知错误'}`);
     }
+  }
+
+  /**
+   * 回填歌曲精确身份索引。该步骤只更新规范化字段，不合并或删除旧歌曲。
+   * 规范化规则与新增歌曲共用 song-utils，避免迁移前后查重结果不一致。
+   */
+  private backfillSongIdentities(): void {
+    const rows = this.db.prepare('SELECT id, title, artist, version FROM songs').all() as Array<{
+      id: number;
+      title: string;
+      artist: string;
+      version: string | null;
+    }>;
+    const update = this.db.prepare(`
+      UPDATE songs SET normalized_title = ?, normalized_artist = ?, normalized_version = ? WHERE id = ?
+    `);
+    try {
+      this.db.transaction(() => {
+        for (const row of rows) {
+          const identity = normalizedSongIdentity(row);
+          update.run(identity.title, identity.artist, identity.version, row.id);
+        }
+      })();
+    } catch (error) {
+      throw new Error(`歌曲身份索引回填失败：${error instanceof Error ? error.message : '未知错误'}`);
+    }
+  }
+
+  /**
+   * 历史数据若存在相同规范化身份，启动时拒绝建立唯一约束并给出人工处理提示。
+   * 这样可以阻止新数据继续扩大问题，同时绝不替部署者自动删除歌曲。
+   */
+  private ensureSongIdentityConstraint(): void {
+    const conflicts = this.db.prepare(`
+      SELECT normalized_title AS title, normalized_artist AS artist, normalized_version AS version,
+             group_concat(id) AS ids, count(*) AS count
+      FROM songs
+      WHERE status = 'active'
+      GROUP BY normalized_title, normalized_artist, normalized_version
+      HAVING count(*) > 1
+      ORDER BY min(id)
+      LIMIT 20
+    `).all() as Array<{ title: string; artist: string; version: string; ids: string; count: number }>;
+    if (conflicts.length) {
+      const summary = conflicts.map((item) => `歌曲 ID [${item.ids}]`).join('；');
+      throw new Error(`检测到 ${conflicts.length} 组活动歌曲身份重复，未启动服务。请人工审核后再升级，不会自动删除或合并歌曲：${summary}`);
+    }
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS songs_normalized_identity_unique
+      ON songs(normalized_title, normalized_artist, normalized_version)
+      WHERE status = 'active'
+    `);
   }
 
   private migrate(directory: string): void {

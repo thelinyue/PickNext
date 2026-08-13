@@ -281,7 +281,12 @@ function AddSongSheet({ open, onOpenChange, defaultCollection, onAdded }: { open
     try {
       const result = await api<{ status: 'created' | 'reused' | 'pending_review' }>('/api/songs', { method: 'POST', body: JSON.stringify(payload) });
       formRef.current?.reset(); setDuplicate(null); setPendingPayload(null);
-      onAdded(result.status === 'pending_review' ? '已提交审核，管理员确认后会自动收录' : result.status === 'reused' ? '已复用曲库中的歌曲' : '歌曲已收进曲库');
+      const collectionType = payload.collectionType as CollectionType | null;
+      onAdded(result.status === 'pending_review'
+        ? '已提交审核，管理员确认后会按本次选择处理'
+        : collectionType
+          ? result.status === 'reused' ? '已复用歌曲并收录到个人曲库' : '歌曲已加入全部曲库并收录到个人曲库'
+          : result.status === 'reused' ? '已复用全部曲库歌曲，未收录到个人曲库' : '歌曲已加入全部曲库，未收录到个人曲库');
     } catch (reason) {
       if (reason instanceof ApiError && (reason.code === 'EXACT_DUPLICATE' || reason.code === 'SIMILAR_SONGS_FOUND')) {
         setPendingPayload(payload); setDuplicate({ code: reason.code, matches: (reason.data.matches as DuplicateMatch[] | undefined) ?? [] });
@@ -290,8 +295,30 @@ function AddSongSheet({ open, onOpenChange, defaultCollection, onAdded }: { open
   };
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); const data = new FormData(event.currentTarget);
-    await send({ title: data.get('title'), artist: data.get('artist'), version: data.get('version') || undefined, language: data.get('language') || undefined, genre: data.get('genre') || undefined, difficulty: data.get('difficulty') || undefined, collectionType: data.get('collectionType'), performanceType: data.get('performanceType'), personalDifficulty: data.get('personalDifficulty') || null, note: data.get('note') || undefined });
+    const collectionType = (data.get('collectionType') || null) as CollectionType | null;
+    await send({
+      title: data.get('title'), artist: data.get('artist'), version: data.get('version') || undefined,
+      language: data.get('language') || undefined, genre: data.get('genre') || undefined,
+      difficulty: data.get('difficulty') || undefined, collectionType,
+      performanceType: data.get('performanceType'),
+      personalDifficulty: collectionType ? data.get('personalDifficulty') || null : null,
+      note: collectionType ? data.get('note') || undefined : undefined
+    });
   };
   const resolve = (action: 'reuse' | 'submit_review' | 'create_anyway', matchedSongId?: number) => pendingPayload && send({ ...pendingPayload, duplicateAction: action, matchedSongId });
-  return <Sheet open={open} onOpenChange={(value) => { onOpenChange(value); if (!value) { setDuplicate(null); setError(''); } }} title="收一首歌"><form ref={formRef} className="form-stack" onSubmit={submit}><label>歌名<input name="title" required maxLength={120} autoFocus /></label><label>歌手<input name="artist" required maxLength={120} /></label><div className="form-grid"><label>版本<input name="version" placeholder="Live / 女声版" /></label><label>语种<input name="language" placeholder="国语" /></label></div><div className="form-grid"><label>曲风<input name="genre" placeholder="流行" /></label><label>演唱类型<select name="performanceType"><option value="solo">独唱</option><option value="duet">对唱</option><option value="chorus">合唱</option></select></label></div><div className="form-grid"><label>参考难度<select name="difficulty"><option value="">未设置</option><option value="easy">简单</option><option value="medium">中等</option><option value="hard">困难</option></select></label><label>我的难度<select name="personalDifficulty"><option value="">使用参考难度</option><option value="easy">简单</option><option value="medium">中等</option><option value="hard">困难</option></select></label></div><label>先放到<select name="collectionType" defaultValue={defaultCollection}><option value="learning">待学清单</option><option value="repertoire">会唱曲库</option></select></label><label>我的备注<textarea name="note" placeholder="副歌高音、进歌提示……" /></label>{error && <p className="form-error">{error}</p>}<Button loading={busy} type="submit">收进曲库</Button></form>{duplicate && <div className="duplicate-panel"><h3>{duplicate.code === 'EXACT_DUPLICATE' ? '曲库中已有这首歌' : '发现相似歌曲'}</h3><p>{duplicate.code === 'EXACT_DUPLICATE' ? '直接复用可避免重复数据；继续新增需管理员审核。' : '请先确认是否可以复用已有歌曲。'}</p>{duplicate.matches.map((song) => <BasicSongCard key={song.id} song={song} action={<Button className="secondary compact" loading={busy} onClick={() => resolve('reuse', song.id)}>复用</Button>} />)}<div className="duplicate-actions">{duplicate.code === 'EXACT_DUPLICATE' ? <Button className="secondary" loading={busy} onClick={() => resolve('submit_review', duplicate.matches[0]?.id)}>提交审核</Button> : <Button className="secondary" loading={busy} onClick={() => resolve('create_anyway')}>仍然新增</Button>}</div></div>}</Sheet>;
+  return <Sheet open={open} onOpenChange={(value) => { onOpenChange(value); if (!value) { setDuplicate(null); setError(''); } }} title="收一首歌">
+    <form ref={formRef} className="form-stack" onSubmit={submit}>
+      <label>歌名<input name="title" required maxLength={120} autoFocus /></label>
+      <label>歌手<input name="artist" required maxLength={120} /></label>
+      <div className="form-grid"><label>版本<input name="version" placeholder="Live / 女声版" /></label><label>语种<input name="language" placeholder="国语" /></label></div>
+      <div className="form-grid"><label>曲风<input name="genre" placeholder="流行" /></label><label>演唱类型<select name="performanceType"><option value="solo">独唱</option><option value="duet">对唱</option><option value="chorus">合唱</option></select></label></div>
+      <div className="form-grid"><label>参考难度<select name="difficulty"><option value="">未设置</option><option value="easy">简单</option><option value="medium">中等</option><option value="hard">困难</option></select></label><label>我的难度<select name="personalDifficulty"><option value="">使用参考难度</option><option value="easy">简单</option><option value="medium">中等</option><option value="hard">困难</option></select></label></div>
+      <label>个人归属<select name="collectionType" defaultValue={defaultCollection}><option value="learning">待学清单</option><option value="repertoire">会唱曲库</option><option value="">仅维护全局资料，不收录到我的个人曲库</option></select></label>
+      <label>我的备注<textarea name="note" placeholder="副歌高音、进歌提示……" /></label>
+      <p className="helper">不收录时歌曲仍会进入全部曲库，但不会影响你的个人曲库和 Pick。</p>
+      {error && <p className="form-error">{error}</p>}
+      <Button loading={busy} type="submit">收进曲库</Button>
+    </form>
+    {duplicate && <div className="duplicate-panel"><h3>{duplicate.code === 'EXACT_DUPLICATE' ? '曲库中已有这首歌' : '发现相似歌曲'}</h3><p>{duplicate.code === 'EXACT_DUPLICATE' ? '直接复用可避免重复数据；继续新增需管理员审核。' : '请先确认是否可以复用已有歌曲。'}</p>{duplicate.matches.map((song) => <BasicSongCard key={song.id} song={song} action={<Button className="secondary compact" loading={busy} onClick={() => resolve('reuse', song.id)}>复用</Button>} />)}<div className="duplicate-actions">{duplicate.code === 'EXACT_DUPLICATE' ? <Button className="secondary" loading={busy} onClick={() => resolve('submit_review', duplicate.matches[0]?.id)}>提交审核</Button> : <Button className="secondary" loading={busy} onClick={() => resolve('create_anyway')}>仍然新增</Button>}</div></div>}
+  </Sheet>;
 }

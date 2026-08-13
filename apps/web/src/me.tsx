@@ -87,6 +87,14 @@ function ReviewCenter({ open, onOpenChange, notify }: { open: boolean; onOpenCha
 
 function ImportSheet({ open, onOpenChange, notify }: { open: boolean; onOpenChange(open: boolean): void; notify(message: string): void }) {
   const [content, setContent] = useState(''); const [busy, setBusy] = useState(false);
-  const submit = async () => { setBusy(true); try { const task = await api<{ taskId: string }>('/api/imports', { method: 'POST', body: JSON.stringify({ format: 'text', content, collectionType: 'learning' }) }); setContent(''); onOpenChange(false); notify(`导入任务已创建：${task.taskId.slice(0, 8)}`); } catch (reason) { notify(reason instanceof Error ? reason.message : '导入失败'); } finally { setBusy(false); } };
-  return <Sheet open={open} onOpenChange={onOpenChange} title="批量粘贴收歌"><div className="sheet-stack"><p className="helper">每行一首，格式为“歌名 - 歌手”。默认进入待学清单。</p><textarea className="import-area" value={content} onChange={(event) => setContent(event.target.value)} placeholder={'晴天 - 周杰伦\n富士山下 - 陈奕迅'} /><Button disabled={!content.trim()} loading={busy} onClick={submit}>开始导入</Button></div></Sheet>;
+  const [collectionType, setCollectionType] = useState<'learning' | 'repertoire' | null>('learning');
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const task = await api<{ taskId: string }>('/api/imports', { method: 'POST', body: JSON.stringify({ format: 'text', content, collectionType }) });
+      setContent(''); onOpenChange(false); notify(`导入任务已创建：${task.taskId.slice(0, 8)}`);
+    } catch (reason) { notify(reason instanceof Error ? reason.message : '导入失败'); }
+    finally { setBusy(false); }
+  };
+  return <Sheet open={open} onOpenChange={onOpenChange} title="批量粘贴收歌"><div className="sheet-stack"><p className="helper">每行一首，格式为“歌名 - 歌手”。默认进入待学清单。</p><label>个人归属<select value={collectionType ?? ''} onChange={(event) => setCollectionType((event.target.value || null) as 'learning' | 'repertoire' | null)}><option value="learning">待学清单</option><option value="repertoire">会唱曲库</option><option value="">仅维护全局资料，不收录到我的个人曲库</option></select></label><p className="helper">不收录时歌曲仍会进入全部曲库，但不会影响你的个人曲库和 Pick。</p><textarea className="import-area" value={content} onChange={(event) => setContent(event.target.value)} placeholder={'晴天 - 周杰伦\n富士山下 - 陈奕迅'} /><Button disabled={!content.trim()} loading={busy} onClick={submit}>开始导入</Button></div></Sheet>;
 }

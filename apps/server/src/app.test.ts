@@ -25,8 +25,20 @@ async function setup(): Promise<string> {
   return cookie!.split(';')[0]!;
 }
 
+async function waitForTask(cookie: string, taskId: string): Promise<any> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const response = await app.inject({ method: 'GET', url: `/api/tasks/${taskId}`, headers: { cookie } });
+    const task = response.json();
+    if (task.status === 'done' || task.status === 'failed' || task.status === 'cancelled') return task;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error('导入任务在测试等待窗口内未完成。');
+}
+
 describe('核心 API 纵向闭环', () => {
   it('首次启动自动生成并稳定复用会话签名密钥', async () => {
+    expect(database.db.prepare("SELECT value FROM app_settings WHERE key = 'session_secret'").get()).toBeUndefined();
+    await setup();
     const first = database.db.prepare("SELECT value FROM app_settings WHERE key = 'session_secret'").get() as { value: string };
     expect(first.value).toMatch(/^[0-9a-f]{64}$/);
     await app.close();
@@ -95,6 +107,42 @@ describe('核心 API 纵向闭环', () => {
     const history = await app.inject({ method: 'GET', url: '/api/history', headers: { cookie } });
     expect(history.json().plays).toHaveLength(1);
     expect(history.json().plays[0]).toMatchObject({ title: '晴天', rating: 4, note: '状态不错' });
+  });
+
+  it('新增和导入歌曲可以只维护全局资料而不收录个人曲库', async () => {
+    const cookie = await setup();
+    const globalOnly = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie }, payload: {
+      title: '只维护歌曲', artist: '维护歌手', collectionType: null
+    } });
+    expect(globalOnly.statusCode).toBe(201);
+    const globalOnlyId = globalOnly.json().songId;
+    expect((database.db.prepare('SELECT count(*) AS count FROM user_songs WHERE song_id = ?').get(globalOnlyId) as any).count).toBe(0);
+    expect((database.db.prepare('SELECT count(*) AS count FROM song_user_meta WHERE song_id = ?').get(globalOnlyId) as any).count).toBe(0);
+    expect((await app.inject({ method: 'GET', url: '/api/search?scope=global&q=只维护歌曲', headers: { cookie } })).json().songs[0]).toMatchObject({ id: globalOnlyId, collectionType: null });
+
+    const defaulted = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie }, payload: {
+      title: '默认待学歌曲', artist: '默认歌手'
+    } });
+    expect(defaulted.statusCode).toBe(201);
+    expect((database.db.prepare('SELECT collection_type AS collectionType FROM user_songs WHERE song_id = ?').get(defaulted.json().songId) as any).collectionType).toBe('learning');
+
+    const personal = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie }, payload: {
+      title: '复用保留歌曲', artist: '复用歌手', collectionType: 'repertoire'
+    } });
+    const reused = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie }, payload: {
+      title: '复用保留歌曲', artist: '复用歌手', collectionType: null,
+      duplicateAction: 'reuse', matchedSongId: personal.json().songId
+    } });
+    expect(reused.statusCode).toBe(200);
+    expect((database.db.prepare('SELECT collection_type AS collectionType FROM user_songs WHERE song_id = ?').get(personal.json().songId) as any).collectionType).toBe('repertoire');
+
+    const imported = await app.inject({ method: 'POST', url: '/api/imports', headers: { cookie }, payload: {
+      format: 'text', content: '批量全局歌曲一 - 批量歌手\n批量全局歌曲二 - 批量歌手', collectionType: null
+    } });
+    expect(imported.statusCode).toBe(202);
+    const task = await waitForTask(cookie, imported.json().taskId);
+    expect(task).toMatchObject({ status: 'done' });
+    expect((database.db.prepare(`SELECT count(*) AS count FROM user_songs us JOIN songs s ON s.id = us.song_id WHERE s.title LIKE '批量全局歌曲%'`).get() as any).count).toBe(0);
   });
 
   it('Pick 上下文可以恢复当前歌曲、筛选、数量和个人筛选项', async () => {
@@ -189,10 +237,13 @@ describe('核心 API 纵向闭环', () => {
       title: '待学的歌', artist: '歌手乙', language: '粤语', genre: '摇滚', difficulty: 'hard', collectionType: 'learning'
     } });
     const ownerId = (database.db.prepare(`SELECT id FROM users WHERE username = 'singer'`).get() as { id: number }).id;
+    const normalizedTitle = '全站歌曲';
+    const normalizedArtist = '歌手丙';
     const globalSongId = Number(database.db.prepare(`
-      INSERT INTO songs(title, artist, language, genre, difficulty, performance_type, status, added_by)
-      VALUES ('全站歌曲', '歌手丙', '英语', '民谣', 'medium', 'duet', 'active', ?)
-    `).run(ownerId).lastInsertRowid);
+      INSERT INTO songs(title, artist, language, genre, difficulty, performance_type, status,
+        normalized_title, normalized_artist, normalized_version, added_by)
+      VALUES ('全站歌曲', '歌手丙', '英语', '民谣', 'medium', 'duet', 'active', ?, ?, '', ?)
+    `).run(normalizedTitle, normalizedArtist, ownerId).lastInsertRowid);
     for (const [index, rating] of [5, 4, 4].entries()) {
       const userId = Number(database.db.prepare(`
         INSERT INTO users(username, password_hash, role) VALUES (?, 'test-hash', 'user')
@@ -428,5 +479,21 @@ describe('核心 API 纵向闭环', () => {
     expect(personal.json().songs[0]).toMatchObject({ id: original.json().songId });
     expect((await app.inject({ method: 'POST', url: `/api/reviews/${submitted.json().submissionId}/reject`, headers: { cookie: adminCookie }, payload: {} })).statusCode).toBe(409);
     expect(user.json().userId).toBeGreaterThan(0);
+  });
+
+  it('不收录的重复歌曲提交审核后不会建立个人曲库关系', async () => {
+    const adminCookie = await setup();
+    const original = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie: adminCookie }, payload: { title: '审核全局歌曲', artist: '审核歌手', collectionType: 'repertoire' } });
+    const user = await app.inject({ method: 'POST', url: '/api/admin/users', headers: { cookie: adminCookie }, payload: { username: 'global-maintainer', password: 'password123' } });
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'global-maintainer', password: 'password123' } });
+    const header = login.headers['set-cookie']; const userCookie = (Array.isArray(header) ? header[0] : header)!.split(';')[0]!;
+    const submitted = await app.inject({ method: 'POST', url: '/api/songs', headers: { cookie: userCookie }, payload: {
+      title: '审核全局歌曲', artist: '审核歌手', collectionType: null,
+      duplicateAction: 'submit_review', matchedSongId: original.json().songId
+    } });
+    expect(submitted.statusCode).toBe(202);
+    expect((await app.inject({ method: 'POST', url: `/api/reviews/${submitted.json().submissionId}/merge`, headers: { cookie: adminCookie }, payload: {} })).statusCode).toBe(200);
+    expect((database.db.prepare('SELECT count(*) AS count FROM user_songs WHERE user_id = ? AND song_id = ?').get(user.json().userId, original.json().songId) as any).count).toBe(0);
+    expect((await app.inject({ method: 'GET', url: '/api/search?scope=personal&collection=learning', headers: { cookie: userCookie } })).json().total).toBe(0);
   });
 });

@@ -59,6 +59,17 @@ docker exec -e ALLOW_TEST_SEED=1 <容器名> node apps/server/dist/seed-test-dat
 
 ## Docker Compose 部署
 
+### 数据库备份与恢复检查
+
+PickNext 使用 SQLite 数据卷保存账号、曲库和 Pick 历史。升级镜像或执行迁移前，建议先备份整个 `./data` 目录；也可以使用应用内的 SQLite 原生快照命令：
+
+```bash
+docker compose exec picknext node apps/server/dist/backup.js backup /data/picknext.db /data/picknext.db.backup
+docker compose exec picknext node apps/server/dist/backup.js check /data/picknext.db.backup
+```
+
+恢复前先停止服务，将经过检查的数据库文件放回 `./data/picknext.db`，然后重新启动容器。迁移使用追加式 SQL；迁移失败时保留原数据库文件和备份，不要删除 `-wal` 或 `-shm` 文件后强行启动。备份命令使用 SQLite 原生 backup API，恢复检查使用只读 `integrity_check`，不会修改线上数据库。
+
 v0.1.2 镜像发布在 GitHub Container Registry，仅提供 `linux/amd64`：
 
 ```text

@@ -7,6 +7,8 @@
     "dev": "tsx watch src/dev.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
+    "backup": "node dist/backup.js backup",
+    "restore:check": "node dist/backup.js check",
     "seed:test": "node dist/seed-test-data.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run src"

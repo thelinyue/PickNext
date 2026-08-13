@@ -39,6 +39,22 @@ export function songIdentityKey(song: SongIdentityInput): string {
 }
 
 /**
+ * 返回可直接写入数据库索引列的歌曲身份组成部分。
+ * 三个字段分开保存，既便于精确查重，也避免每次查询都在应用层扫描整张歌曲表。
+ */
+export function normalizedSongIdentity(song: SongIdentityInput): {
+  title: string;
+  artist: string;
+  version: string;
+} {
+  return {
+    title: normalizeIdentityPart(song.title),
+    artist: normalizeIdentityPart(song.artist),
+    version: normalizeIdentityPart(song.version)
+  };
+}
+
+/**
  * 相似候选只用于提醒，不直接阻止新增。精确身份由调用方优先判断。
  * 同歌名、同歌手或互相包含时给出稳定分数，避免引入不可解释的模糊算法。
  */

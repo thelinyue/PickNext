@@ -12,6 +12,8 @@
     "test": "pnpm -r --if-present test",
     "test:e2e": "pnpm build && playwright test",
     "start": "pnpm --filter @picknext/server start"
+    ,"backup": "pnpm --filter @picknext/server build && pnpm --filter @picknext/server backup"
+    ,"restore:check": "pnpm --filter @picknext/server build && pnpm --filter @picknext/server restore:check"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",
