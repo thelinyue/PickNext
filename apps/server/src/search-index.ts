@@ -15,7 +15,7 @@ export function rebuildSongSearchIndex(db: Database.Database, songId: number): v
   if (!hasSearchTable(db, 'song_search')) return;
   db.prepare('DELETE FROM song_search WHERE song_id = ?').run(songId);
   const song = db.prepare(`
-    SELECT s.id, s.title, s.artist, s.version, s.pinyin, s.lyrics,
+    SELECT s.id, s.title, s.artist, s.version, s.album, s.pinyin, s.lyrics,
            s.lyrics_translit AS lyricsTranslit,
            coalesce(group_concat(a.alias, ' '), '') AS aliases
     FROM songs s LEFT JOIN song_aliases a ON a.song_id = s.id
@@ -26,6 +26,7 @@ export function rebuildSongSearchIndex(db: Database.Database, songId: number): v
     title: string;
     artist: string;
     version: string | null;
+    album: string | null;
     pinyin: string | null;
     lyrics: string | null;
     lyricsTranslit: string | null;

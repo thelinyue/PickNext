@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { resolve } from 'node:path';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
 import jwt from '@fastify/jwt';
@@ -34,6 +35,7 @@ import {
   setupSchema,
   snoozeSchema,
   userSongBatchSchema,
+  updateProfileSchema,
   updatePlaylistSchema,
   updateSongUserMetaSchema,
   updateSongSchema
@@ -46,6 +48,9 @@ import { PickError, PickService } from './pick-service.js';
 import { buildSongIndex, normalizedSongIdentity } from './song-utils.js';
 import { rebuildSongSearchIndex, rebuildUserSongSearchIndex, toFtsQuery } from './search-index.js';
 import { CatalogService, type CatalogCandidate } from './services/catalog-service.js';
+import { CoverStorage } from './services/cover-storage.js';
+import { MtwClient, type MtwScanProgress } from './services/mtw-client.js';
+import { ProfileStorage } from './services/profile-storage.js';
 import type { AppContext, UserPayload } from './types.js';
 
 const idParamSchema = z.object({ id: z.coerce.number().int().positive() });
@@ -73,6 +78,15 @@ class UserSongBatchError extends Error {
 
 function currentUser(request: FastifyRequest): UserPayload {
   return request.user as UserPayload;
+}
+
+function toUserPayload(row: any): UserPayload {
+  const nickname = typeof row.nickname === 'string' && row.nickname.trim() ? row.nickname.trim() : null;
+  const avatarUrl = row.avatarPath ? `/api/auth/avatar?v=${encodeURIComponent(row.profileUpdatedAt ?? '')}` : null;
+  return {
+    id: Number(row.id), username: row.username, nickname, displayName: nickname ?? row.username, avatarUrl,
+    role: row.role, isMaintainer: Boolean(row.isMaintainer), canAddSongs: Boolean(row.canAddSongs)
+  };
 }
 
 /**
@@ -115,9 +129,22 @@ export async function buildApp(context: AppContext) {
   const app = Fastify({ logger: process.env.NODE_ENV !== 'test' });
   const pickService = new PickService(context.db);
   const catalog = new CatalogService(context.db);
+  const coverStorage = new CoverStorage(context.db, resolve(context.dataRoot ?? process.cwd(), 'covers'));
+  const profileStorage = new ProfileStorage(resolve(context.dataRoot ?? process.cwd(), 'avatars'));
   const audit = new AuditLogger(context.db);
   const loginLimiter = new LoginRateLimiter();
   const sessionSecret = getOrCreateSessionSecret(context.db);
+  const readMtwSettings = () => ({
+    baseUrl: (context.db.prepare("SELECT value FROM app_settings WHERE key = 'mtw_base_url'").get() as { value: string } | undefined)?.value ?? '',
+    token: (context.db.prepare("SELECT value FROM app_settings WHERE key = 'mtw_token'").get() as { value: string } | undefined)?.value ?? '',
+    username: (context.db.prepare("SELECT value FROM app_settings WHERE key = 'mtw_username'").get() as { value: string } | undefined)?.value ?? '',
+    password: (context.db.prepare("SELECT value FROM app_settings WHERE key = 'mtw_password'").get() as { value: string } | undefined)?.value ?? ''
+  });
+  const mtwClient = () => {
+    const settings = readMtwSettings();
+    if (!settings.baseUrl) throw new Error('尚未配置 MTW 服务地址。');
+    return new MtwClient(settings);
+  };
   const invalidateQueues = (userId: number) => context.db.prepare(`
     UPDATE pick_queue_items SET status = 'invalidated' WHERE status = 'pending' AND session_id IN (
       SELECT id FROM pick_sessions WHERE user_id = ? AND ended_at IS NULL
@@ -147,6 +174,9 @@ export async function buildApp(context: AppContext) {
         context.db.transaction(() => {
           const matches = catalog.findCandidates(entry);
           if (matches.exact) {
+            context.db.prepare(`UPDATE songs SET album = coalesce(?, album), lyrics = coalesce(?, lyrics) WHERE id = ? AND status = 'active'`)
+              .run(entry.album ?? null, (entry as ImportEntry & { lyrics?: string }).lyrics ?? null, matches.exact.id);
+            rebuildSongSearchIndex(context.db, matches.exact.id);
             catalog.collectUserSong(task.userId, matches.exact.id, { collectionType: body.collectionType });
             reused += 1;
             return;
@@ -209,11 +239,12 @@ export async function buildApp(context: AppContext) {
     try {
       const token = await request.jwtVerify<UserPayload>();
       const row = context.db.prepare(`
-        SELECT id, username, role, is_maintainer AS isMaintainer, can_add_songs AS canAddSongs
+        SELECT id, username, nickname, avatar_path AS avatarPath, profile_updated_at AS profileUpdatedAt,
+          role, is_maintainer AS isMaintainer, can_add_songs AS canAddSongs
         FROM users WHERE id = ? AND is_system = 0
       `).get(token.id) as any;
       if (!row) throw new Error('账号不存在');
-      request.user = { ...row, isMaintainer: Boolean(row.isMaintainer), canAddSongs: Boolean(row.canAddSongs) };
+      request.user = toUserPayload(row);
     } catch {
       return reply.code(401).send({ code: 'UNAUTHORIZED', message: '登录已失效，请重新登录。' });
     }
@@ -265,7 +296,7 @@ export async function buildApp(context: AppContext) {
         const result = context.db.prepare(`
           INSERT INTO users(username, password_hash, role, last_login_at) VALUES (?, ?, 'admin', datetime('now'))
         `).run(body.username, passwordHash);
-        const created: UserPayload = { id: Number(result.lastInsertRowid), username: body.username, role: 'admin', isMaintainer: false, canAddSongs: true };
+        const created: UserPayload = { id: Number(result.lastInsertRowid), username: body.username, nickname: null, displayName: body.username, avatarUrl: null, role: 'admin', isMaintainer: false, canAddSongs: true };
         context.db.prepare(`INSERT INTO playlists(owner_id, name, kind) VALUES (?, '下一次 KTV', 'next_ktv')`).run(created.id);
         context.db.prepare(`
           INSERT INTO app_settings(key, value, updated_at) VALUES ('session_secret', ?, datetime('now'))
@@ -291,7 +322,8 @@ export async function buildApp(context: AppContext) {
       return reply.code(429).send({ code: 'RATE_LIMITED', message: `登录失败次数过多，请 ${rate.retryAfterSeconds} 秒后重试。` });
     }
     const row = context.db.prepare(`
-      SELECT id, username, role, password_hash, is_maintainer, can_add_songs
+      SELECT id, username, nickname, avatar_path AS avatarPath, profile_updated_at AS profileUpdatedAt,
+        role, password_hash, is_maintainer, can_add_songs
       FROM users WHERE username = ? COLLATE NOCASE AND is_system = 0
     `).get(body.username) as any;
     if (!row || !(await verifyPassword(body.password, row.password_hash))) {
@@ -300,13 +332,7 @@ export async function buildApp(context: AppContext) {
       return reply.code(401).send({ code: 'INVALID_CREDENTIALS', message: '用户名或密码不正确。' });
     }
     loginLimiter.succeeded(loginKey);
-    const user: UserPayload = {
-      id: row.id,
-      username: row.username,
-      role: row.role,
-      isMaintainer: Boolean(row.is_maintainer),
-      canAddSongs: Boolean(row.can_add_songs)
-    };
+    const user = toUserPayload({ ...row, isMaintainer: row.is_maintainer, canAddSongs: row.can_add_songs });
     context.db.prepare("UPDATE users SET last_login_at = datetime('now') WHERE id = ?").run(user.id);
     audit.record({ actorUserId: user.id, action: 'login_succeeded', targetType: 'user', targetId: user.id });
     await issueSession(request, reply, user);
@@ -327,7 +353,7 @@ export async function buildApp(context: AppContext) {
         INSERT INTO users(username, password_hash, role, is_maintainer, can_add_songs, last_login_at)
         VALUES (?, ?, 'user', 0, 1, datetime('now'))
       `).run(body.username, passwordHash);
-      const created: UserPayload = { id: Number(result.lastInsertRowid), username: body.username, role: 'user', isMaintainer: false, canAddSongs: true };
+      const created: UserPayload = { id: Number(result.lastInsertRowid), username: body.username, nickname: null, displayName: body.username, avatarUrl: null, role: 'user', isMaintainer: false, canAddSongs: true };
       context.db.prepare(`INSERT INTO playlists(owner_id, name, kind) VALUES (?, '下一次 KTV', 'next_ktv')`).run(created.id);
       return created;
     })();
@@ -341,6 +367,45 @@ export async function buildApp(context: AppContext) {
   });
   app.get('/api/auth/me', { preHandler: requireUser }, async (request) => ({ user: currentUser(request) }));
 
+  app.patch('/api/auth/profile', { preHandler: requireUser, bodyLimit: 2 * 1024 * 1024 }, async (request, reply) => {
+    const user = currentUser(request);
+    const body = updateProfileSchema.parse(request.body);
+    const existing = context.db.prepare('SELECT nickname, avatar_path AS avatarPath, avatar_mime_type AS avatarMimeType FROM users WHERE id = ?').get(user.id) as { nickname: string | null; avatarPath: string | null; avatarMimeType: string | null } | undefined;
+    if (!existing) return reply.code(404).send({ code: 'USER_NOT_FOUND', message: '当前用户不存在。' });
+    const nickname = body.nickname === undefined ? existing.nickname : body.nickname?.trim() || null;
+    let avatarPath = existing.avatarPath;
+    let avatarMimeType = existing.avatarMimeType;
+    let newAvatarPath: string | null = null;
+    try {
+      if (body.avatar !== undefined) {
+        if (body.avatar === null) {
+          avatarPath = null;
+          avatarMimeType = null;
+        } else {
+          const stored = profileStorage.save(user.id, body.avatar);
+          avatarPath = stored.path;
+          avatarMimeType = stored.mimeType;
+          newAvatarPath = stored.path;
+        }
+      }
+      context.db.prepare(`UPDATE users SET nickname = ?, avatar_path = ?, avatar_mime_type = ?, profile_updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?`).run(nickname, avatarPath, avatarMimeType, user.id);
+    } catch (error) {
+      if (newAvatarPath) profileStorage.remove(newAvatarPath);
+      return reply.code(400).send({ code: 'PROFILE_UPDATE_INVALID', message: error instanceof Error ? error.message : '个人资料更新失败。' });
+    }
+    if (existing.avatarPath && existing.avatarPath !== avatarPath) profileStorage.remove(existing.avatarPath);
+    const row = context.db.prepare(`SELECT id, username, nickname, avatar_path AS avatarPath, profile_updated_at AS profileUpdatedAt,
+      role, is_maintainer AS isMaintainer, can_add_songs AS canAddSongs FROM users WHERE id = ?`).get(user.id);
+    return { user: toUserPayload(row) };
+  });
+
+  app.get('/api/auth/avatar', { preHandler: requireUser }, async (request, reply) => {
+    const row = context.db.prepare('SELECT avatar_path AS avatarPath, avatar_mime_type AS avatarMimeType FROM users WHERE id = ?').get(currentUser(request).id) as { avatarPath: string | null; avatarMimeType: string | null } | undefined;
+    if (!row?.avatarPath || !row.avatarMimeType) return reply.code(404).send({ code: 'AVATAR_NOT_FOUND', message: '当前用户还没有设置头像。' });
+    try { return reply.type(row.avatarMimeType).send(profileStorage.read(row.avatarPath)); }
+    catch { return reply.code(404).send({ code: 'AVATAR_NOT_FOUND', message: '头像文件不存在，请重新上传。' }); }
+  });
+
   /**
    * 用户列表的筛选和分页全部在 SQLite 中完成，避免大量账号一次性传到移动端。
    * “曲库管家”仍是普通用户的权限状态，不扩展数据库 role 枚举。
@@ -348,7 +413,7 @@ export async function buildApp(context: AppContext) {
   app.get('/api/admin/users', { preHandler: requireAdmin }, async (request) => {
     const query = adminUsersQuerySchema.parse(request.query);
     const params = { term: `%${query.q}%`, limit: query.limit, offset: query.offset };
-    const clauses = ['is_system = 0', query.q ? 'username LIKE @term' : '1 = 1'];
+    const clauses = ['is_system = 0', query.q ? '(username LIKE @term OR coalesce(nickname, \'\') LIKE @term)' : '1 = 1'];
     if (query.type === 'admin') clauses.push("role = 'admin'");
     if (query.type === 'maintainer') clauses.push("role = 'user' AND is_maintainer = 1");
     if (query.type === 'user') clauses.push("role = 'user' AND is_maintainer = 0");
@@ -363,7 +428,7 @@ export async function buildApp(context: AppContext) {
       last_login_desc: 'last_login_at IS NULL, last_login_at DESC, id DESC'
     }[query.sort];
     const users = (context.db.prepare(`
-      SELECT id, username, role, is_maintainer AS isMaintainer, can_add_songs AS canAddSongs,
+      SELECT id, username, nickname, role, is_maintainer AS isMaintainer, can_add_songs AS canAddSongs,
         created_at AS createdAt, last_login_at AS lastLoginAt,
         (SELECT count(*) FROM user_songs us WHERE us.user_id = users.id AND us.removed_at IS NULL) AS personalSongCount
       FROM users WHERE ${where} ORDER BY ${order} LIMIT @limit OFFSET @offset
@@ -385,7 +450,7 @@ export async function buildApp(context: AppContext) {
   app.get('/api/admin/users/:id', { preHandler: requireAdmin }, async (request, reply) => {
     const { id } = idParamSchema.parse(request.params);
     const row = context.db.prepare(`
-      SELECT u.id, u.username, u.role, u.is_maintainer AS isMaintainer, u.can_add_songs AS canAddSongs,
+      SELECT u.id, u.username, u.nickname, u.role, u.is_maintainer AS isMaintainer, u.can_add_songs AS canAddSongs,
         u.created_at AS createdAt, u.last_login_at AS lastLoginAt,
         (SELECT count(*) FROM user_songs us WHERE us.user_id = u.id AND us.removed_at IS NULL) AS personalSongCount,
         (SELECT count(*) FROM user_songs us WHERE us.user_id = u.id AND us.removed_at IS NULL AND us.collection_type = 'repertoire') AS repertoireCount,
@@ -547,11 +612,368 @@ export async function buildApp(context: AppContext) {
     return { ok: true, registrationOpen: body.open };
   });
 
+  app.get('/api/admin/settings/mtw', { preHandler: requireAdmin }, async () => {
+    const settings = readMtwSettings();
+    return { baseUrl: settings.baseUrl, tokenConfigured: Boolean(settings.token), usernameConfigured: Boolean(settings.username), passwordConfigured: Boolean(settings.password) };
+  });
+
+  app.put('/api/admin/settings/mtw', { preHandler: requireAdmin }, async (request) => {
+    const body = z.object({ baseUrl: z.string().trim().url().max(500), token: z.string().trim().max(1000).optional(), username: z.string().trim().max(200).optional(), password: z.string().max(500).optional() }).parse(request.body);
+    context.db.prepare(`INSERT INTO app_settings(key, value, updated_at) VALUES ('mtw_base_url', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`).run(body.baseUrl.replace(/\/$/, ''));
+    if (body.token !== undefined && body.token !== '') {
+      context.db.prepare(`INSERT INTO app_settings(key, value, updated_at) VALUES ('mtw_token', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`).run(body.token);
+    }
+    if (body.username !== undefined && body.username !== '') {
+      context.db.prepare(`INSERT INTO app_settings(key, value, updated_at) VALUES ('mtw_username', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`).run(body.username);
+    }
+    if (body.password !== undefined && body.password !== '') {
+      context.db.prepare(`INSERT INTO app_settings(key, value, updated_at) VALUES ('mtw_password', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`).run(body.password);
+    }
+    audit.record({ actorUserId: currentUser(request).id, action: 'mtw_settings_updated', targetType: 'system' });
+    const settings = readMtwSettings();
+    return { ok: true, baseUrl: body.baseUrl.replace(/\/$/, ''), tokenConfigured: Boolean(settings.token), usernameConfigured: Boolean(settings.username), passwordConfigured: Boolean(settings.password) };
+  });
+
+  app.get('/api/admin/mtw/health', { preHandler: requireAdmin }, async (_request, reply) => {
+    try { return await mtwClient().health(); }
+    catch (error) { return reply.code(400).send({ code: 'MTW_NOT_CONFIGURED', message: error instanceof Error ? error.message : 'MTW 健康检查失败。' }); }
+  });
+
+  const runMtwScan = async (batchId: string, path: string): Promise<void> => {
+    const saveProgress = (progress: MtwScanProgress) => {
+      context.db.prepare("UPDATE mtw_batches SET result = ?, progress = ?, updated_at = datetime('now') WHERE id = ? AND status = 'scanning'").run(JSON.stringify(progress), JSON.stringify(progress), batchId);
+    };
+    try {
+      const scanned = await mtwClient().scanMetadata(path, saveProgress);
+      const images = scanned.files.map((item) => item.path ?? item.file_full_path ?? '').filter((value) => /\.(?:jpe?g|png|webp)$/i.test(value));
+      const insert = context.db.prepare(`INSERT INTO mtw_batch_items(batch_id, source_path, cover_path, title, artist, album, version, language, genre, lyrics) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      context.db.transaction(() => {
+        for (const item of scanned.metadata) {
+          const sourcePath = item.path;
+          const parent = sourcePath?.replace(/[\\/][^\\/]*$/, '') ?? '';
+          const coverPath = images.find((value) => value.replace(/[\\/][^\\/]*$/, '') === parent) ?? (item.artworkAvailable ? sourcePath : null);
+          insert.run(batchId, sourcePath, coverPath, item.title, item.artist, item.album, item.version, item.language, item.genre, item.lyrics);
+        }
+        const completed = { phase: 'completed', completed: scanned.metadata.length, total: scanned.metadata.length, message: `目录扫描完成，共找到 ${scanned.metadata.length} 首歌曲。`, count: scanned.metadata.length };
+        context.db.prepare("UPDATE mtw_batches SET status = 'ready', result = ?, progress = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(completed), JSON.stringify(completed), batchId);
+      })();
+    } catch (error) {
+      context.db.prepare("UPDATE mtw_batches SET status = 'failed', error = ?, updated_at = datetime('now') WHERE id = ? AND status <> 'cancelled'").run(error instanceof Error ? error.message : 'MTW 扫描失败。', batchId);
+    }
+  };
+
+  /** 管理后台的 MTW 导入任务在服务端执行，避免移动端请求长时间占用连接。 */
+  const runMtwImport = async (batchId: string, itemIds: number[], userId: number): Promise<void> => {
+    let created = 0; let updated = 0; let similarSkipped = 0; let covers = 0; let coverFailed = 0; let processed = 0;
+    try {
+      const rows = context.db.prepare(`SELECT * FROM mtw_batch_items WHERE batch_id = ? AND id IN (${itemIds.map(() => '?').join(',')}) ORDER BY id`).all(batchId, ...itemIds) as any[];
+      for (const item of rows) {
+        const state = context.db.prepare('SELECT status FROM mtw_batches WHERE id = ?').get(batchId) as { status: string } | undefined;
+        if (!state || state.status === 'cancelled') break;
+        const matches = catalog.findCandidates(item);
+        if (matches.similar.length && !matches.exact) {
+          context.db.prepare("UPDATE mtw_batch_items SET action = 'similar_skipped' WHERE id = ?").run(item.id); similarSkipped += 1;
+        } else {
+          let songId: number;
+          if (matches.exact) {
+            songId = matches.exact.id;
+            context.db.prepare(`UPDATE songs SET album = coalesce(?, album), language = coalesce(?, language), genre = coalesce(?, genre), lyrics = coalesce(?, lyrics) WHERE id = ?`).run(item.album, item.language, item.genre, item.lyrics, songId);
+            rebuildSongSearchIndex(context.db, songId); updated += 1;
+            context.db.prepare("UPDATE mtw_batch_items SET song_id = ?, action = 'updated' WHERE id = ?").run(songId, item.id);
+          } else {
+            songId = catalog.createSong({ title: item.title, artist: item.artist, version: item.version, album: item.album, language: item.language, genre: item.genre, lyrics: item.lyrics, performanceType: 'solo', addedBy: userId });
+            context.db.prepare("UPDATE mtw_batch_items SET song_id = ?, action = 'created' WHERE id = ?").run(songId, item.id); created += 1;
+          }
+          // 先报告歌曲资料已经处理，封面下载失败或超时不会让进度长期停在 0%。
+          context.db.prepare("UPDATE mtw_batches SET progress = ?, updated_at = datetime('now') WHERE id = ? AND status = 'importing'").run(JSON.stringify({ phase: 'importing', completed: processed + 1, total: rows.length, itemIds, message: '歌曲资料已处理，正在获取封面' }), batchId);
+          if (item.cover_path) {
+            try {
+              const cover = await mtwClient().fetchImage(item.cover_path);
+              coverStorage.save(songId, cover.bytes, cover.mimeType, item.cover_path); covers += 1;
+              context.db.prepare("UPDATE mtw_batch_items SET cover_status = 'ready', error = NULL WHERE id = ?").run(item.id);
+            } catch (error) {
+              coverFailed += 1;
+              context.db.prepare("UPDATE mtw_batch_items SET cover_status = 'failed', error = ? WHERE id = ?").run(error instanceof Error ? error.message : '封面下载失败。', item.id);
+            }
+          } else context.db.prepare("UPDATE mtw_batch_items SET cover_status = 'missing' WHERE id = ?").run(item.id);
+        }
+        processed += 1;
+        context.db.prepare("UPDATE mtw_batches SET progress = ?, updated_at = datetime('now') WHERE id = ? AND status = 'importing'").run(JSON.stringify({ phase: 'importing', completed: processed, total: rows.length, itemIds, message: `正在导入 ${item.title} · ${item.artist}`, created, updated, similarSkipped, covers, coverFailed }), batchId);
+      }
+      const cancelled = (context.db.prepare('SELECT status FROM mtw_batches WHERE id = ?').get(batchId) as { status: string } | undefined)?.status === 'cancelled';
+      const remaining = (context.db.prepare("SELECT count(*) AS count FROM mtw_batch_items WHERE batch_id = ? AND action = 'candidate'").get(batchId) as { count: number }).count;
+      const finalStatus = cancelled ? 'cancelled' : coverFailed > 0 ? 'partial_failed' : remaining > 0 ? 'ready' : 'done';
+      context.db.prepare("UPDATE mtw_batches SET status = ?, result = ?, progress = ?, updated_at = datetime('now') WHERE id = ? AND status IN ('importing', 'cancelled')").run(finalStatus, JSON.stringify({ created, updated, similarSkipped, covers, coverFailed, processed }), JSON.stringify({ phase: finalStatus, completed: processed, total: rows.length, message: cancelled ? '导入已取消。' : `导入完成，共处理 ${processed} 首。`, created, updated, similarSkipped, covers, coverFailed }), batchId);
+    } catch (error) {
+      context.db.prepare("UPDATE mtw_batches SET status = 'failed', error = ?, updated_at = datetime('now') WHERE id = ? AND status = 'importing'").run(error instanceof Error ? error.message : 'MTW 导入失败。', batchId);
+    }
+  };
+
+  /** 服务重启后恢复未完成的 MTW 导入，避免前端看到 importing 却永远停在 0%。 */
+  const recoverMtwImports = (): void => {
+    // 旧版数据库的状态约束不包含 partial_failed，避免一次导入已处理完却被错误标记为失败。
+    context.db.prepare("UPDATE mtw_batches SET status = 'partial_failed', error = '歌曲资料已导入，但部分封面失败，可在批次中重试封面。', updated_at = datetime('now') WHERE status = 'failed' AND error LIKE 'CHECK constraint failed:%' AND progress LIKE '%\"phase\":\"importing\"%'").run();
+    const batches = context.db.prepare("SELECT id, created_by AS createdBy, progress FROM mtw_batches WHERE status = 'importing'").all() as Array<{ id: string; createdBy: number; progress: string | null }>;
+    for (const batch of batches) {
+      let total = 0;
+      try { total = Number((batch.progress ? JSON.parse(batch.progress) : {}).total ?? 0); } catch { total = 0; }
+      const rows = context.db.prepare('SELECT id FROM mtw_batch_items WHERE batch_id = ? ORDER BY id LIMIT ?').all(batch.id, Math.max(1, total)) as Array<{ id: number }>;
+      if (!rows.length) {
+        context.db.prepare("UPDATE mtw_batches SET status = 'failed', error = ?, updated_at = datetime('now') WHERE id = ? AND status = 'importing'").run('服务重启后没有找到待恢复的歌曲，请重新选择候选歌曲导入。', batch.id);
+        continue;
+      }
+      void runMtwImport(batch.id, rows.map((row) => row.id), batch.createdBy);
+    }
+  };
+
+  const mtwItemFilters = (query: { q?: string; artist?: string; album?: string; coverStatus?: string; lyricsStatus?: string; action?: string }) => {
+    const clauses = ['batch_id = @batchId'];
+    const params: Record<string, string | number> = { batchId: '' };
+    if (query.q) { clauses.push('(title LIKE @q OR artist LIKE @q OR coalesce(album, \'\') LIKE @q)'); params.q = `%${query.q}%`; }
+    if (query.artist) { clauses.push('artist LIKE @artist'); params.artist = `%${query.artist}%`; }
+    if (query.album) { clauses.push('coalesce(album, \'\') LIKE @album'); params.album = `%${query.album}%`; }
+    if (query.coverStatus && ['pending', 'ready', 'missing', 'failed'].includes(query.coverStatus)) { clauses.push('cover_status = @coverStatus'); params.coverStatus = query.coverStatus; }
+    if (query.lyricsStatus === 'present') clauses.push("trim(coalesce(lyrics, '')) <> ''");
+    if (query.lyricsStatus === 'missing') clauses.push("trim(coalesce(lyrics, '')) = ''");
+    if (query.action && ['candidate', 'created', 'updated', 'similar_skipped', 'failed', 'revoked', 'review'].includes(query.action)) { clauses.push('action = @action'); params.action = query.action; }
+    return { where: clauses.join(' AND '), params };
+  };
+
+  app.post('/api/admin/mtw/scans', { preHandler: requireReviewer }, async (request, reply) => {
+    const body = z.object({ path: z.string().trim().min(1).max(1000) }).parse(request.body);
+    const batchId = randomUUID();
+    context.db.prepare("INSERT INTO mtw_batches(id, created_by, status, result) VALUES (?, ?, 'scanning', ?)").run(batchId, currentUser(request).id, JSON.stringify({ phase: 'listing', completed: 0, total: 0, message: '正在准备 MTW 扫描...' }));
+    void runMtwScan(batchId, body.path);
+    return reply.code(202).send({ batchId, status: 'scanning' });
+  });
+
+  app.get('/api/admin/mtw/scans/:id', { preHandler: requireReviewer }, async (request, reply) => {
+    const { id } = taskParamSchema.parse(request.params);
+    const batch = context.db.prepare('SELECT id, status, result, error, created_at AS createdAt, updated_at AS updatedAt FROM mtw_batches WHERE id = ?').get(id) as any;
+    if (!batch) return reply.code(404).send({ code: 'NOT_FOUND', message: '没有找到 MTW 扫描批次。' });
+    let progress: MtwScanProgress | null = null;
+    try { progress = batch.result ? JSON.parse(batch.result) as MtwScanProgress : null; } catch { progress = null; }
+    const items = context.db.prepare('SELECT id, title, artist, album, version, language, genre, song_id AS songId, action, cover_status AS coverStatus, error FROM mtw_batch_items WHERE batch_id = ? ORDER BY id').all(id);
+    return { batch, progress, items };
+  });
+
+  app.get('/api/admin/mtw/scans/:id/items', { preHandler: requireReviewer }, async (request, reply) => {
+    const { id } = taskParamSchema.parse(request.params);
+    const query = z.object({ q: z.string().trim().max(120).default(''), artist: z.string().trim().max(120).default(''), album: z.string().trim().max(200).default(''), coverStatus: z.string().default(''), lyricsStatus: z.enum(['all', 'present', 'missing']).default('all'), action: z.string().default(''), page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(30), sort: z.enum(['id', 'title', 'artist', 'album']).default('id') }).parse(request.query);
+    const batch = context.db.prepare('SELECT id, status, result, progress, error, created_at AS createdAt, updated_at AS updatedAt FROM mtw_batches WHERE id = ?').get(id) as any;
+    if (!batch) return reply.code(404).send({ code: 'NOT_FOUND', message: '没有找到 MTW 扫描批次。' });
+    const filters = mtwItemFilters(query); filters.params.batchId = id;
+    const order = { id: 'id', title: 'title COLLATE NOCASE, id', artist: 'artist COLLATE NOCASE, title COLLATE NOCASE, id', album: 'album COLLATE NOCASE, title COLLATE NOCASE, id' }[query.sort];
+    const items = context.db.prepare(`SELECT id, title, artist, album, version, language, genre, song_id AS songId, action, cover_status AS coverStatus, trim(coalesce(lyrics, '')) <> '' AS hasLyrics, error FROM mtw_batch_items WHERE ${filters.where} ORDER BY ${order} LIMIT @limit OFFSET @offset`).all({ ...filters.params, limit: query.pageSize, offset: (query.page - 1) * query.pageSize });
+    const total = (context.db.prepare(`SELECT count(*) AS count FROM mtw_batch_items WHERE ${filters.where}`).get(filters.params) as { count: number }).count;
+    const summary = context.db.prepare('SELECT count(*) AS total, sum(CASE WHEN action = \'candidate\' THEN 1 ELSE 0 END) AS candidates, sum(CASE WHEN cover_status = \'ready\' THEN 1 ELSE 0 END) AS covers, sum(CASE WHEN cover_status = \'failed\' THEN 1 ELSE 0 END) AS coverFailures, sum(CASE WHEN trim(coalesce(lyrics, \'\')) = \'\' THEN 1 ELSE 0 END) AS lyricMissing FROM mtw_batch_items WHERE batch_id = ?').get(id) as any;
+    return { batch, items, total, hasMore: query.page * query.pageSize < total, page: query.page, pageSize: query.pageSize, summary: Object.fromEntries(Object.entries(summary).map(([key, value]) => [key, Number(value ?? 0)])) };
+  });
+
+  app.post('/api/admin/mtw/import-batches', { preHandler: requireReviewer }, async (request, reply) => {
+    const user = currentUser(request);
+    const body = z.object({ scanId: z.string().uuid(), itemIds: z.array(z.number().int().positive()).min(1).max(5000) }).parse(request.body);
+    const batch = context.db.prepare("SELECT id, status FROM mtw_batches WHERE id = ? AND status = 'ready'").get(body.scanId) as { id: string; status: string } | undefined;
+    if (!batch) return reply.code(409).send({ code: 'MTW_BATCH_NOT_READY', message: 'MTW 批次尚未准备好或已经处理。' });
+    let created = 0; let updated = 0; let similarSkipped = 0; let covers = 0; let coverFailed = 0;
+    const rows = context.db.prepare(`SELECT * FROM mtw_batch_items WHERE batch_id = ? AND id IN (${body.itemIds.map(() => '?').join(',')})`).all(body.scanId, ...body.itemIds) as any[];
+    for (const item of rows) {
+        const matches = catalog.findCandidates(item);
+        if (matches.similar.length && !matches.exact) {
+          context.db.prepare("UPDATE mtw_batch_items SET action = 'similar_skipped' WHERE id = ?").run(item.id); similarSkipped += 1; continue;
+        }
+        let songId: number;
+        if (matches.exact) {
+          songId = matches.exact.id;
+          context.db.prepare(`UPDATE songs SET album = coalesce(?, album), language = coalesce(?, language), genre = coalesce(?, genre), lyrics = coalesce(?, lyrics) WHERE id = ?`).run(item.album, item.language, item.genre, item.lyrics, songId);
+          rebuildSongSearchIndex(context.db, songId); updated += 1;
+          context.db.prepare("UPDATE mtw_batch_items SET song_id = ?, action = 'updated' WHERE id = ?").run(songId, item.id);
+        } else {
+          songId = catalog.createSong({ title: item.title, artist: item.artist, version: item.version, album: item.album, language: item.language, genre: item.genre, lyrics: item.lyrics, performanceType: 'solo', addedBy: user.id });
+          context.db.prepare("UPDATE mtw_batch_items SET song_id = ?, action = 'created' WHERE id = ?").run(songId, item.id); created += 1;
+        }
+      if (item.cover_path) {
+        try {
+          const cover = await mtwClient().fetchImage(item.cover_path);
+          coverStorage.save(songId, cover.bytes, cover.mimeType, item.cover_path); covers += 1;
+          context.db.prepare("UPDATE mtw_batch_items SET cover_status = 'ready' WHERE id = ?").run(item.id);
+        } catch (error) {
+          coverFailed += 1;
+          context.db.prepare("UPDATE mtw_batch_items SET cover_status = 'failed', error = ? WHERE id = ?").run(error instanceof Error ? error.message : '封面下载失败。', item.id);
+        }
+      } else context.db.prepare("UPDATE mtw_batch_items SET cover_status = 'missing' WHERE id = ?").run(item.id);
+    }
+    context.db.prepare("UPDATE mtw_batches SET status = 'done', result = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify({ created, updated, similarSkipped, covers, coverFailed }), body.scanId);
+    return { batchId: body.scanId, created, updated, similarSkipped, covers, coverFailed };
+  });
+
+  app.post('/api/admin/mtw/import-batches/:id/import', { preHandler: requireReviewer }, async (request, reply) => {
+    const user = currentUser(request); const { id } = taskParamSchema.parse(request.params);
+    const body = z.object({
+      itemIds: z.array(z.number().int().positive()).min(1).max(5000).optional(),
+      filters: z.object({ q: z.string().trim().max(120).default(''), artist: z.string().trim().max(120).default(''), album: z.string().trim().max(200).default(''), coverStatus: z.string().default(''), lyricsStatus: z.enum(['all', 'present', 'missing']).default('all'), action: z.string().default('') }).optional(),
+      excludeItemIds: z.array(z.number().int().positive()).max(5000).default([])
+    }).refine((value) => value.itemIds?.length || value.filters, { message: '必须指定歌曲或筛选条件。' }).parse(request.body);
+    const batch = context.db.prepare("SELECT id, status FROM mtw_batches WHERE id = ? AND status IN ('ready', 'partial_failed', 'cancelled', 'failed')").get(id) as { id: string; status: string } | undefined;
+    if (!batch) return reply.code(409).send({ code: 'MTW_BATCH_NOT_READY', message: 'MTW 批次尚未准备好，或已经在处理中。' });
+    let itemIds = body.itemIds ?? [];
+    if (!body.itemIds && body.filters) {
+      const filters = mtwItemFilters(body.filters); filters.params.batchId = id;
+      if (body.excludeItemIds.length) { body.excludeItemIds.forEach((value, index) => { filters.params[`exclude${index}`] = value; }); filters.where += ` AND id NOT IN (${body.excludeItemIds.map((_, index) => `@exclude${index}`).join(',')})`; }
+      itemIds = (context.db.prepare(`SELECT id FROM mtw_batch_items WHERE ${filters.where} AND action = 'candidate' ORDER BY id`).all(filters.params) as Array<{ id: number }>).map((row) => row.id);
+    }
+    if (!itemIds.length) return reply.code(400).send({ code: 'EMPTY_SELECTION', message: '没有符合条件的待导入歌曲。' });
+    context.db.prepare("UPDATE mtw_batches SET status = 'importing', progress = ?, error = NULL, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify({ phase: 'importing', completed: 0, total: itemIds.length, itemIds, message: '导入任务已排队。' }), id);
+    void runMtwImport(id, itemIds, user.id);
+    return reply.code(202).send({ batchId: id, status: 'importing', selected: itemIds.length });
+  });
+
+  app.post('/api/admin/mtw/import-batches/:id/cancel', { preHandler: requireReviewer }, async (request, reply) => {
+    const { id } = taskParamSchema.parse(request.params);
+    const result = context.db.prepare("UPDATE mtw_batches SET status = 'cancelled', updated_at = datetime('now') WHERE id = ? AND status IN ('scanning', 'importing')").run(id);
+    if (!result.changes) return reply.code(409).send({ code: 'TASK_NOT_RUNNING', message: '当前批次没有正在运行的任务。' });
+    return { ok: true, batchId: id, status: 'cancelled' };
+  });
+
+  app.get('/api/admin/overview', { preHandler: requireReviewer }, async () => {
+    const count = (sql: string) => Number((context.db.prepare(sql).get() as { count: number }).count ?? 0);
+    return {
+      songs: count("SELECT count(*) AS count FROM songs WHERE status = 'active'"), deletedSongs: count("SELECT count(*) AS count FROM songs WHERE status = 'deleted'"),
+      covers: count("SELECT count(*) AS count FROM cover_assets WHERE status = 'ready'"), songsWithoutCover: count("SELECT count(*) AS count FROM songs s WHERE s.status = 'active' AND NOT EXISTS (SELECT 1 FROM song_covers sc WHERE sc.song_id = s.id)"), songsWithoutLyrics: count("SELECT count(*) AS count FROM songs WHERE status = 'active' AND trim(coalesce(lyrics, '')) = ''"),
+      pendingDeletionReviews: count("SELECT count(*) AS count FROM song_deletion_requests WHERE status = 'pending'"), pendingLyricsReviews: count("SELECT count(*) AS count FROM lyric_submissions WHERE status = 'pending'"), pendingSongReviews: count("SELECT count(*) AS count FROM song_submissions WHERE status = 'pending'"),
+      runningTasks: count("SELECT count(*) AS count FROM mtw_batches WHERE status IN ('scanning', 'importing', 'revoking')") + count("SELECT count(*) AS count FROM tasks WHERE status IN ('pending', 'running')"),
+      recentBatches: context.db.prepare('SELECT id, status, result, progress, error, created_at AS createdAt, updated_at AS updatedAt FROM mtw_batches ORDER BY created_at DESC LIMIT 8').all()
+    };
+  });
+
+  app.get('/api/admin/tasks', { preHandler: requireReviewer }, async () => ({
+    mtw: context.db.prepare('SELECT id, status, result, progress, error, created_at AS createdAt, updated_at AS updatedAt FROM mtw_batches ORDER BY updated_at DESC LIMIT 30').all(),
+    imports: context.db.prepare("SELECT id, type, status, result, error, created_at AS createdAt, updated_at AS updatedAt FROM tasks WHERE type = 'song_import' ORDER BY updated_at DESC LIMIT 30").all()
+  }));
+
+  app.get('/api/admin/songs', { preHandler: requireReviewer }, async (request) => {
+    const query = z.object({ q: z.string().trim().max(120).default(''), status: z.enum(['all', 'active', 'deleted']).default('active'), source: z.enum(['all', 'mtw', 'manual']).default('all'), completeness: z.enum(['all', 'missing_album', 'missing_lyrics', 'missing_cover']).default('all'), deletionStatus: z.enum(['all', 'pending']).default('all'), page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(10).max(100).default(30), sort: z.enum(['id', 'title', 'artist', 'updated']).default('updated') }).parse(request.query);
+    const clauses = ['1 = 1']; const params: Record<string, string | number> = {};
+    if (query.q) { clauses.push('(s.title LIKE @q OR s.artist LIKE @q OR coalesce(s.album, \'\') LIKE @q)'); params.q = `%${query.q}%`; }
+    if (query.status !== 'all') { clauses.push('s.status = @status'); params.status = query.status; }
+    if (query.source === 'mtw') clauses.push('EXISTS (SELECT 1 FROM mtw_batch_items mi WHERE mi.song_id = s.id)');
+    if (query.source === 'manual') clauses.push('NOT EXISTS (SELECT 1 FROM mtw_batch_items mi WHERE mi.song_id = s.id)');
+    if (query.completeness === 'missing_album') clauses.push("trim(coalesce(s.album, '')) = ''");
+    if (query.completeness === 'missing_lyrics') clauses.push("trim(coalesce(s.lyrics, '')) = ''");
+    if (query.completeness === 'missing_cover') clauses.push('NOT EXISTS (SELECT 1 FROM song_covers sc WHERE sc.song_id = s.id)');
+    if (query.deletionStatus === 'pending') clauses.push("EXISTS (SELECT 1 FROM song_deletion_requests dr WHERE dr.song_id = s.id AND dr.status = 'pending')");
+    const where = clauses.join(' AND '); const order = { id: 's.id DESC', title: 's.title COLLATE NOCASE, s.id DESC', artist: 's.artist COLLATE NOCASE, s.title COLLATE NOCASE', updated: 's.id DESC' }[query.sort];
+    const songs = context.db.prepare(`SELECT s.id, s.title, s.artist, s.version, s.album, s.language, s.genre, s.status, s.added_by AS addedBy, EXISTS(SELECT 1 FROM song_covers sc WHERE sc.song_id = s.id) AS hasCover, trim(coalesce(s.lyrics, '')) <> '' AS hasLyrics, EXISTS(SELECT 1 FROM mtw_batch_items mi WHERE mi.song_id = s.id) AS fromMtw, EXISTS(SELECT 1 FROM song_deletion_requests dr WHERE dr.song_id = s.id AND dr.status = 'pending') AS deletionPending FROM songs s WHERE ${where} ORDER BY ${order} LIMIT @limit OFFSET @offset`).all({ ...params, limit: query.pageSize, offset: (query.page - 1) * query.pageSize });
+    const total = (context.db.prepare(`SELECT count(*) AS count FROM songs s WHERE ${where}`).get(params) as { count: number }).count;
+    return { songs, total, hasMore: query.page * query.pageSize < total, page: query.page, pageSize: query.pageSize };
+  });
+
+  app.post('/api/admin/songs/bulk-delete', { preHandler: requireReviewer }, async (request) => {
+    const body = z.object({ songIds: z.array(z.number().int().positive()).min(1).max(5000) }).parse(request.body); const ids = [...new Set(body.songIds)];
+    const result = context.db.prepare(`UPDATE songs SET status = 'deleted' WHERE status = 'active' AND id IN (${ids.map(() => '?').join(',')})`).run(...ids);
+    audit.record({ actorUserId: currentUser(request).id, action: 'songs_bulk_deleted', targetType: 'song_batch', metadata: { requested: ids.length, updated: result.changes } }); return { ok: true, updated: result.changes };
+  });
+
+  app.post('/api/admin/songs/bulk-restore', { preHandler: requireReviewer }, async (request) => {
+    const body = z.object({ songIds: z.array(z.number().int().positive()).min(1).max(5000) }).parse(request.body); const ids = [...new Set(body.songIds)];
+    const result = context.db.prepare(`UPDATE songs SET status = 'active' WHERE status = 'deleted' AND id IN (${ids.map(() => '?').join(',')})`).run(...ids);
+    audit.record({ actorUserId: currentUser(request).id, action: 'songs_bulk_restored', targetType: 'song_batch', metadata: { requested: ids.length, updated: result.changes } }); return { ok: true, updated: result.changes };
+  });
+
+  app.get('/api/admin/reviews', { preHandler: requireReviewer }, async (request) => {
+    const query = z.object({ type: z.enum(['all', 'deletion', 'lyrics', 'song']).default('all'), page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(10).max(100).default(30) }).parse(request.query); const rows: any[] = [];
+    if (query.type === 'all' || query.type === 'deletion') rows.push(...context.db.prepare("SELECT 'deletion' AS type, r.id, r.status, r.created_at AS createdAt, s.id AS songId, s.title, s.artist, s.album, u.username AS submitter, r.review_note AS note FROM song_deletion_requests r JOIN songs s ON s.id = r.song_id JOIN users u ON u.id = r.requested_by WHERE r.status = 'pending' ORDER BY r.created_at").all());
+    if (query.type === 'all' || query.type === 'lyrics') rows.push(...context.db.prepare("SELECT 'lyrics' AS type, l.id, l.status, l.created_at AS createdAt, s.id AS songId, s.title, s.artist, s.album, u.username AS submitter, l.source, l.lyrics, NULL AS note FROM lyric_submissions l JOIN songs s ON s.id = l.song_id JOIN users u ON u.id = l.submitted_by WHERE l.status = 'pending' ORDER BY l.created_at").all());
+    if (query.type === 'all' || query.type === 'song') rows.push(...context.db.prepare("SELECT 'song' AS type, ss.id, ss.status, ss.created_at AS createdAt, ss.matched_song_id AS songId, u.username AS submitter, NULL AS title, NULL AS artist, NULL AS album, NULL AS note FROM song_submissions ss JOIN users u ON u.id = ss.submitted_by WHERE ss.status = 'pending' ORDER BY ss.created_at").all());
+    rows.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || Number(a.id) - Number(b.id)); const start = (query.page - 1) * query.pageSize;
+    return { reviews: rows.slice(start, start + query.pageSize), total: rows.length, hasMore: start + query.pageSize < rows.length, page: query.page, pageSize: query.pageSize };
+  });
+
+  const reviewBatchAction = async (request: FastifyRequest, reply: FastifyReply, decision: 'approve' | 'reject') => {
+    const reviewer = currentUser(request); const body = z.object({ type: z.enum(['deletion', 'lyrics']), reviewIds: z.array(z.number().int().positive()).min(1).max(5000), reviewNote: z.string().trim().max(1000).optional() }).parse(request.body); let updated = 0;
+    for (const id of [...new Set(body.reviewIds)]) {
+      if (body.type === 'deletion') {
+        if (decision === 'approve') { const changed = context.db.transaction(() => { const row = context.db.prepare("SELECT song_id AS songId FROM song_deletion_requests WHERE id = ? AND status = 'pending'").get(id) as { songId: number } | undefined; if (!row) return false; const result = context.db.prepare("UPDATE song_deletion_requests SET status = 'approved', reviewed_by = ?, review_note = ?, reviewed_at = datetime('now') WHERE id = ? AND status = 'pending'").run(reviewer.id, body.reviewNote ?? null, id); if (!result.changes) return false; context.db.prepare("UPDATE songs SET status = 'deleted' WHERE id = ? AND status = 'active'").run(row.songId); return true; })(); if (changed) updated += 1; }
+        else updated += context.db.prepare("UPDATE song_deletion_requests SET status = 'rejected', reviewed_by = ?, review_note = ?, reviewed_at = datetime('now') WHERE id = ? AND status = 'pending'").run(reviewer.id, body.reviewNote ?? null, id).changes;
+      } else if (decision === 'approve') { const changed = context.db.transaction(() => { const row = context.db.prepare("SELECT song_id AS songId, lyrics FROM lyric_submissions WHERE id = ? AND status = 'pending'").get(id) as { songId: number; lyrics: string } | undefined; if (!row) return false; const result = context.db.prepare("UPDATE lyric_submissions SET status = 'approved', reviewed_by = ?, review_note = ?, reviewed_at = datetime('now') WHERE id = ? AND status = 'pending'").run(reviewer.id, body.reviewNote ?? null, id); if (!result.changes) return false; context.db.prepare('UPDATE songs SET lyrics = ? WHERE id = ?').run(row.lyrics, row.songId); rebuildSongSearchIndex(context.db, row.songId); return true; })(); if (changed) updated += 1; }
+      else updated += context.db.prepare("UPDATE lyric_submissions SET status = 'rejected', reviewed_by = ?, review_note = ?, reviewed_at = datetime('now') WHERE id = ? AND status = 'pending'").run(reviewer.id, body.reviewNote ?? null, id).changes;
+    }
+    return reply.send({ ok: true, updated });
+  };
+  app.post('/api/admin/reviews/bulk-approve', { preHandler: requireReviewer }, async (request, reply) => reviewBatchAction(request, reply, 'approve'));
+  app.post('/api/admin/reviews/bulk-reject', { preHandler: requireReviewer }, async (request, reply) => reviewBatchAction(request, reply, 'reject'));
+
+  app.get('/api/admin/mtw/import-batches', { preHandler: requireReviewer }, async () => ({ batches: context.db.prepare('SELECT id, status, result, progress, error, created_at AS createdAt, updated_at AS updatedAt FROM mtw_batches ORDER BY created_at DESC').all() }));
+
+  app.get('/api/admin/mtw/import-batches/:id', { preHandler: requireReviewer }, async (request, reply) => {
+    const { id } = taskParamSchema.parse(request.params);
+    const batch = context.db.prepare('SELECT id, status, result, error, created_at AS createdAt, updated_at AS updatedAt FROM mtw_batches WHERE id = ?').get(id) as any;
+    if (!batch) return reply.code(404).send({ code: 'NOT_FOUND', message: '没有找到 MTW 导入批次。' });
+    return { batch, items: context.db.prepare('SELECT * FROM mtw_batch_items WHERE batch_id = ? ORDER BY id').all(id) };
+  });
+
+  app.get('/api/admin/mtw/import-batches/:id/items', { preHandler: requireReviewer }, async (request) => {
+    const { id } = taskParamSchema.parse(request.params);
+    const query = z.object({ q: z.string().trim().max(120).default(''), artist: z.string().trim().max(120).default(''), album: z.string().trim().max(200).default(''), coverStatus: z.string().default(''), lyricsStatus: z.enum(['all', 'present', 'missing']).default('all'), action: z.string().default(''), page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(30), sort: z.enum(['id', 'title', 'artist', 'album']).default('id') }).parse(request.query);
+    const filters = mtwItemFilters(query); filters.params.batchId = id;
+    const order = { id: 'id', title: 'title COLLATE NOCASE, id', artist: 'artist COLLATE NOCASE, title COLLATE NOCASE, id', album: 'album COLLATE NOCASE, title COLLATE NOCASE, id' }[query.sort];
+    const items = context.db.prepare(`SELECT id, title, artist, album, version, language, genre, song_id AS songId, action, cover_status AS coverStatus, error FROM mtw_batch_items WHERE ${filters.where} ORDER BY ${order} LIMIT @limit OFFSET @offset`).all({ ...filters.params, limit: query.pageSize, offset: (query.page - 1) * query.pageSize });
+    const total = (context.db.prepare(`SELECT count(*) AS count FROM mtw_batch_items WHERE ${filters.where}`).get(filters.params) as { count: number }).count;
+    return { items, total, hasMore: query.page * query.pageSize < total, page: query.page, pageSize: query.pageSize };
+  });
+
+  app.post('/api/admin/mtw/import-batches/:id/retry-covers', { preHandler: requireReviewer }, async (request) => {
+    const { id } = taskParamSchema.parse(request.params);
+    const items = context.db.prepare("SELECT id, song_id AS songId, cover_path AS coverPath FROM mtw_batch_items WHERE batch_id = ? AND cover_path IS NOT NULL AND cover_status IN ('failed', 'pending')").all(id) as Array<{ id: number; songId: number | null; coverPath: string }>;
+    let imported = 0; let failed = 0;
+    for (const item of items) {
+      if (!item.songId) continue;
+      try {
+        const cover = await mtwClient().fetchImage(item.coverPath);
+        coverStorage.save(item.songId, cover.bytes, cover.mimeType, item.coverPath);
+        context.db.prepare("UPDATE mtw_batch_items SET cover_status = 'ready', error = NULL WHERE id = ?").run(item.id); imported += 1;
+      } catch (error) {
+        context.db.prepare("UPDATE mtw_batch_items SET cover_status = 'failed', error = ? WHERE id = ?").run(error instanceof Error ? error.message : '封面下载失败。', item.id); failed += 1;
+      }
+    }
+    return { batchId: id, imported, failed };
+  });
+
+  app.post('/api/admin/mtw/import-batches/:id/revoke', { preHandler: requireReviewer }, async (request) => {
+    const { id } = taskParamSchema.parse(request.params);
+    const items = context.db.prepare("SELECT id, song_id AS songId, action FROM mtw_batch_items WHERE batch_id = ? AND action = 'created' AND song_id IS NOT NULL").all(id) as Array<{ id: number; songId: number; action: string }>;
+    let revoked = 0; let needsReview = 0;
+    for (const item of items) {
+      const used = context.db.prepare(`
+        SELECT EXISTS(SELECT 1 FROM user_songs WHERE song_id = ? AND removed_at IS NULL)
+          OR EXISTS(SELECT 1 FROM plays WHERE song_id = ?)
+          OR EXISTS(SELECT 1 FROM pick_events WHERE song_id = ?)
+          OR EXISTS(SELECT 1 FROM playlist_songs WHERE song_id = ?) AS used
+      `).get(item.songId, item.songId, item.songId, item.songId) as { used: number };
+      if (used.used) {
+        const existing = context.db.prepare("SELECT id FROM song_deletion_requests WHERE song_id = ? AND status = 'pending'").get(item.songId);
+        if (!existing) context.db.prepare("INSERT INTO song_deletion_requests(song_id, requested_by, review_note) VALUES (?, ?, 'MTW 批次撤销发现该歌曲已有使用记录，请审核。')").run(item.songId, currentUser(request).id);
+        context.db.prepare("UPDATE mtw_batch_items SET action = 'review' WHERE id = ?").run(item.id);
+        needsReview += 1;
+      } else {
+        const cover = context.db.prepare('SELECT cover_id AS coverId FROM song_covers WHERE song_id = ?').get(item.songId) as { coverId: number } | undefined;
+        context.db.prepare('DELETE FROM song_covers WHERE song_id = ?').run(item.songId);
+        context.db.prepare("UPDATE songs SET status = 'deleted' WHERE id = ? AND status = 'active'").run(item.songId);
+        context.db.prepare("UPDATE mtw_batch_items SET action = 'revoked' WHERE id = ?").run(item.id);
+        if (cover) coverStorage.removeIfUnused(cover.coverId);
+        revoked += 1;
+      }
+    }
+    context.db.prepare("UPDATE mtw_batches SET status = 'revoked', result = ?, updated_at = datetime('now') WHERE id = ? AND status IN ('done', 'ready', 'partial_failed')").run(JSON.stringify({ revoked, needsReview }), id);
+    return { batchId: id, revoked, needsReview };
+  });
+
   app.get('/api/songs', { preHandler: requireUser }, async (request) => {
     const user = currentUser(request);
     const query = z.object({ collection: z.enum(['repertoire', 'learning']).optional() }).parse(request.query);
     const rows = context.db.prepare(`
-      SELECT s.id, s.title, s.artist, s.version, s.language, s.genre,
+      SELECT s.id, s.title, s.artist, s.version, s.album, s.language, s.genre,
+             EXISTS(SELECT 1 FROM song_covers sc WHERE sc.song_id = s.id) AS hasCover,
              coalesce(m.override_diff, s.difficulty) AS difficulty, s.performance_type AS performanceType,
              us.collection_type AS collectionType, m.rating, m.key_shift AS keyShift,
              m.note, m.memory_cue AS memoryCue, m.pick_snoozed_until AS snoozedUntil,
@@ -562,7 +984,7 @@ export async function buildApp(context: AppContext) {
         AND (@collection IS NULL OR us.collection_type = @collection)
       ORDER BY s.artist COLLATE NOCASE, s.title COLLATE NOCASE
     `).all({ userId: user.id, collection: query.collection ?? null });
-    return { songs: rows };
+    return { songs: (rows as any[]).map((row) => ({ ...row, coverUrl: row.hasCover ? `/api/songs/${row.id}/cover` : null })) };
   });
 
   app.post('/api/songs', { preHandler: requireUser }, async (request, reply) => {
@@ -570,7 +992,7 @@ export async function buildApp(context: AppContext) {
     const body = createSongSchema.parse(request.body);
     const matches = catalog.findCandidates(body);
     const publicCandidate = (song: CatalogCandidate) => ({
-      id: song.id, title: song.title, artist: song.artist, version: song.version,
+      id: song.id, title: song.title, artist: song.artist, version: song.version, album: song.album,
       language: song.language, genre: song.genre, difficulty: song.difficulty,
       performanceType: song.performanceType
     });
@@ -609,7 +1031,7 @@ export async function buildApp(context: AppContext) {
     };
     if (body.duplicateAction === 'submit_review' && matches.exact) {
       const publicPayload = {
-        title: body.title, artist: body.artist, version: body.version ?? null,
+        title: body.title, artist: body.artist, version: body.version ?? null, album: body.album ?? null,
         language: body.language ?? null, genre: body.genre ?? null,
         difficulty: body.difficulty ?? null, performanceType: body.performanceType,
         lyrics: body.lyrics ?? null, lyricsTranslit: body.lyricsTranslit ?? null,
@@ -687,7 +1109,7 @@ export async function buildApp(context: AppContext) {
     ].join(' AND ');
     const queryCte = `
       WITH catalog AS (
-        SELECT DISTINCT s.id, s.title, s.artist, s.version, s.language, s.genre,
+        SELECT DISTINCT s.id, s.title, s.artist, s.version, s.album, s.language, s.genre,
           s.difficulty AS referenceDifficulty, s.performance_type AS performanceType,
           s.pinyin, coalesce(s.title_initial, '#') AS titleInitial, s.created_at AS songCreatedAt,
           s.lyrics, s.lyrics_translit AS lyricsTranslit,
@@ -706,7 +1128,8 @@ export async function buildApp(context: AppContext) {
           CASE WHEN (SELECT count(*) FROM song_user_meta am WHERE am.song_id = s.id AND am.rating IS NOT NULL) >= 3
             THEN (SELECT count(*) FROM song_user_meta am WHERE am.song_id = s.id AND am.rating IS NOT NULL)
             ELSE NULL END AS aggregateRatingCount,
-          ss.pinyin_compact AS indexedPinyin
+          ss.pinyin_compact AS indexedPinyin,
+          EXISTS(SELECT 1 FROM song_covers sc WHERE sc.song_id = s.id) AS hasCover
         FROM songs s
         LEFT JOIN user_songs us ON us.song_id = s.id AND us.user_id = @userId AND us.removed_at IS NULL
         LEFT JOIN song_user_meta m ON m.song_id = s.id AND m.user_id = @userId
@@ -721,7 +1144,7 @@ export async function buildApp(context: AppContext) {
               OR id IN (SELECT song_id FROM user_song_search WHERE user_id = @userId AND user_song_search MATCH @ftsQuery)
             )
           ) OR indexedPinyin LIKE @compactTerm
-          OR title LIKE @term OR artist LIKE @term OR coalesce(version, '') LIKE @term
+          OR title LIKE @term OR artist LIKE @term OR coalesce(version, '') LIKE @term OR coalesce(album, '') LIKE @term
           OR coalesce(lyrics, '') LIKE @term OR coalesce(lyricsTranslit, '') LIKE @term
           OR coalesce(personalNote, '') LIKE @term OR coalesce(personalMemoryCue, '') LIKE @term
           OR EXISTS (SELECT 1 FROM song_aliases a WHERE a.song_id = catalog.id AND a.alias LIKE @term)
@@ -761,6 +1184,8 @@ export async function buildApp(context: AppContext) {
       title: song.title,
       artist: song.artist,
       version: song.version,
+      album: song.album,
+      coverUrl: song.hasCover ? `/api/songs/${song.id}/cover` : null,
       language: song.language,
       genre: song.genre,
       performanceType: song.performanceType,
@@ -781,6 +1206,8 @@ export async function buildApp(context: AppContext) {
       title: song.title,
       artist: song.artist,
       version: song.version,
+      album: song.album,
+      coverUrl: song.hasCover ? `/api/songs/${song.id}/cover` : null,
       language: song.language,
       genre: song.genre,
       performanceType: song.performanceType,
@@ -802,8 +1229,9 @@ export async function buildApp(context: AppContext) {
     const user = currentUser(request);
     const { id } = idParamSchema.parse(request.params);
     const song = context.db.prepare(`
-      SELECT s.id, s.title, s.artist, s.version, s.language, s.genre, s.difficulty,
+      SELECT s.id, s.title, s.artist, s.version, s.album, s.language, s.genre, s.difficulty,
              s.performance_type AS performanceType, s.lyrics, s.lyrics_translit AS lyricsTranslit,
+             EXISTS(SELECT 1 FROM song_covers sc WHERE sc.song_id = s.id) AS hasCover,
              us.collection_type AS collectionType, m.rating, m.note, m.key_shift AS keyShift,
              m.override_diff AS personalDifficulty, m.memory_cue AS memoryCue, s.added_by AS addedBy,
              coalesce((SELECT json_group_array(alias) FROM song_aliases WHERE song_id = s.id), '[]') AS aliasesJson
@@ -816,9 +1244,12 @@ export async function buildApp(context: AppContext) {
     return {
       ...value,
       aliases: JSON.parse(value.aliasesJson ?? '[]') as string[],
+      album: value.album ?? null,
+      coverUrl: value.hasCover ? `/api/songs/${value.id}/cover` : null,
       aliasesJson: undefined,
       canEditGlobal: user.role === 'admin' || user.isMaintainer,
-      canEditLyrics: user.role === 'admin' || user.isMaintainer || value.addedBy === user.id
+      canEditLyrics: user.role === 'admin' || user.isMaintainer || value.addedBy === user.id,
+      canRequestDeletion: value.addedBy === user.id
     };
   });
 
@@ -836,7 +1267,7 @@ export async function buildApp(context: AppContext) {
     const index = buildSongIndex(body.title);
     const identity = normalizedSongIdentity(body);
     const result = context.db.prepare(`
-      UPDATE songs SET title = @title, artist = @artist, version = @version,
+      UPDATE songs SET title = @title, artist = @artist, version = @version, album = @album,
         normalized_title = @normalizedTitle, normalized_artist = @normalizedArtist, normalized_version = @normalizedVersion,
         language = @language, genre = @genre, difficulty = @difficulty,
         performance_type = @performanceType, lyrics = @lyrics,
@@ -847,6 +1278,7 @@ export async function buildApp(context: AppContext) {
       title: body.title,
       artist: body.artist,
       version: body.version || null,
+      album: body.album || null,
       normalizedTitle: identity.title,
       normalizedArtist: identity.artist,
       normalizedVersion: identity.version,
@@ -900,6 +1332,120 @@ export async function buildApp(context: AppContext) {
     `).run(user.id, id, body.collectionType);
     rebuildUserSongSearchIndex(context.db, user.id, id);
     invalidateQueues(user.id);
+    return { ok: true };
+  });
+
+  app.get('/api/songs/:id/cover', { preHandler: requireUser }, async (request, reply) => {
+    const { id } = idParamSchema.parse(request.params);
+    const cover = coverStorage.get(id);
+    if (!cover) return reply.code(404).send({ code: 'NOT_FOUND', message: '这首歌还没有封面。' });
+    try {
+      return reply.type(cover.mimeType).send(coverStorage.read(cover.path));
+    } catch {
+      return reply.code(404).send({ code: 'COVER_NOT_FOUND', message: '封面文件不存在，请重新导入封面。' });
+    }
+  });
+
+  app.get('/api/songs/:id/lyrics-candidates', { preHandler: requireUser }, async (request, reply) => {
+    const { id } = idParamSchema.parse(request.params);
+    const song = context.db.prepare('SELECT title, artist, album FROM songs WHERE id = ? AND status = \'active\'').get(id) as { title: string; artist: string; album: string | null } | undefined;
+    if (!song) return reply.code(404).send({ code: 'NOT_FOUND', message: '没有找到这首歌。' });
+    if (!song.album) return reply.code(400).send({ code: 'ALBUM_REQUIRED', message: '请先补充专辑名，再从 MTW 获取歌词。' });
+    try { return { candidates: await mtwClient().lyrics(song.title, song.artist, song.album) }; }
+    catch (error) { return reply.code(502).send({ code: 'MTW_LYRICS_FAILED', message: error instanceof Error ? error.message : 'MTW 歌词获取失败。' }); }
+  });
+
+  app.post('/api/songs/:id/lyrics-submissions', { preHandler: requireUser }, async (request, reply) => {
+    const user = currentUser(request); const { id } = idParamSchema.parse(request.params);
+    const body = z.object({ lyrics: z.string().min(1).max(200_000), source: z.string().trim().max(100).default('mtw') }).parse(request.body);
+    const song = context.db.prepare('SELECT id, added_by AS addedBy, status FROM songs WHERE id = ?').get(id) as { id: number; addedBy: number; status: string } | undefined;
+    if (!song || song.status !== 'active') return reply.code(404).send({ code: 'NOT_FOUND', message: '没有找到这首歌。' });
+    const canEdit = user.role === 'admin' || user.isMaintainer || song.addedBy === user.id;
+    if (canEdit) {
+      context.db.prepare('UPDATE songs SET lyrics = ? WHERE id = ?').run(body.lyrics, id);
+      rebuildSongSearchIndex(context.db, id);
+      audit.record({ actorUserId: user.id, action: 'song_lyrics_updated', targetType: 'song', targetId: id, metadata: { source: body.source } });
+      return { status: 'approved', songId: id };
+    }
+    const result = context.db.prepare('INSERT INTO lyric_submissions(song_id, submitted_by, lyrics, source) VALUES (?, ?, ?, ?)').run(id, user.id, body.lyrics, body.source);
+    return reply.code(202).send({ status: 'pending_review', submissionId: Number(result.lastInsertRowid) });
+  });
+
+  app.post('/api/songs/:id/deletion-requests', { preHandler: requireUser }, async (request, reply) => {
+    const user = currentUser(request); const { id } = idParamSchema.parse(request.params);
+    const body = z.object({ note: z.string().trim().max(1000).optional() }).parse(request.body ?? {});
+    const song = context.db.prepare("SELECT id, added_by AS addedBy, status FROM songs WHERE id = ?").get(id) as { id: number; addedBy: number; status: string } | undefined;
+    if (!song || song.status !== 'active') return reply.code(404).send({ code: 'NOT_FOUND', message: '没有找到可申请删除的歌曲。' });
+    if (song.addedBy !== user.id) return reply.code(403).send({ code: 'FORBIDDEN', message: '只能申请删除自己创建的歌曲。' });
+    if (context.db.prepare("SELECT id FROM song_deletion_requests WHERE song_id = ? AND status = 'pending'").get(id)) return reply.code(409).send({ code: 'REQUEST_EXISTS', message: '这首歌已经有待处理的删除申请。' });
+    const result = context.db.prepare('INSERT INTO song_deletion_requests(song_id, requested_by, review_note) VALUES (?, ?, ?)').run(id, user.id, body.note ?? null);
+    audit.record({ actorUserId: user.id, action: 'song_deletion_requested', targetType: 'song', targetId: id });
+    return reply.code(202).send({ requestId: Number(result.lastInsertRowid) });
+  });
+
+  app.get('/api/reviews/deletion-requests', { preHandler: requireReviewer }, async () => ({ requests: context.db.prepare(`
+    SELECT r.id, r.song_id AS songId, r.status, r.review_note AS note, r.created_at AS createdAt,
+      s.title, s.artist, s.version, s.album, u.username AS requester
+    FROM song_deletion_requests r JOIN songs s ON s.id = r.song_id JOIN users u ON u.id = r.requested_by
+    WHERE r.status = 'pending' ORDER BY r.created_at
+  `).all() }));
+
+  app.post('/api/reviews/deletion-requests/:id/approve', { preHandler: requireReviewer }, async (request, reply) => {
+    const reviewer = currentUser(request); const { id } = idParamSchema.parse(request.params);
+    const body = reviewDecisionSchema.parse(request.body ?? {});
+    const result = context.db.transaction(() => {
+      const row = context.db.prepare("SELECT song_id AS songId FROM song_deletion_requests WHERE id = ? AND status = 'pending'").get(id) as { songId: number } | undefined;
+      if (!row) return false;
+      const changed = context.db.prepare("UPDATE song_deletion_requests SET status = 'approved', reviewed_by = ?, review_note = ?, reviewed_at = datetime('now') WHERE id = ? AND status = 'pending'").run(reviewer.id, body.reviewNote ?? null, id);
+      if (!changed.changes) return false;
+      context.db.prepare("UPDATE songs SET status = 'deleted' WHERE id = ? AND status = 'active'").run(row.songId);
+      return true;
+    })();
+    if (!result) return reply.code(409).send({ code: 'REVIEW_ALREADY_RESOLVED', message: '这条删除申请已被处理。' });
+    audit.record({ actorUserId: reviewer.id, action: 'song_deletion_approved', targetType: 'deletion_request', targetId: id });
+    return { ok: true };
+  });
+
+  app.post('/api/reviews/deletion-requests/:id/reject', { preHandler: requireReviewer }, async (request, reply) => {
+    const reviewer = currentUser(request); const { id } = idParamSchema.parse(request.params); const body = reviewDecisionSchema.parse(request.body ?? {});
+    const result = context.db.prepare("UPDATE song_deletion_requests SET status = 'rejected', reviewed_by = ?, review_note = ?, reviewed_at = datetime('now') WHERE id = ? AND status = 'pending'").run(reviewer.id, body.reviewNote ?? null, id);
+    if (!result.changes) return reply.code(409).send({ code: 'REVIEW_ALREADY_RESOLVED', message: '这条删除申请已被处理。' });
+    audit.record({ actorUserId: reviewer.id, action: 'song_deletion_rejected', targetType: 'deletion_request', targetId: id });
+    return { ok: true };
+  });
+
+  app.post('/api/songs/:id/restore', { preHandler: requireReviewer }, async (request, reply) => {
+    const reviewer = currentUser(request); const { id } = idParamSchema.parse(request.params);
+    const result = context.db.prepare("UPDATE songs SET status = 'active' WHERE id = ? AND status = 'deleted'").run(id);
+    if (!result.changes) return reply.code(404).send({ code: 'NOT_FOUND', message: '没有找到可恢复的歌曲。' });
+    audit.record({ actorUserId: reviewer.id, action: 'song_restored', targetType: 'song', targetId: id });
+    return { ok: true };
+  });
+
+  app.get('/api/reviews/lyrics', { preHandler: requireReviewer }, async () => ({ submissions: context.db.prepare(`
+    SELECT l.id, l.song_id AS songId, l.lyrics, l.source, l.created_at AS createdAt,
+      s.title, s.artist, s.album, u.username AS submitter
+    FROM lyric_submissions l JOIN songs s ON s.id = l.song_id JOIN users u ON u.id = l.submitted_by
+    WHERE l.status = 'pending' ORDER BY l.created_at
+  `).all() }));
+
+  app.post('/api/reviews/lyrics/:id/approve', { preHandler: requireReviewer }, async (request, reply) => {
+    const reviewer = currentUser(request); const { id } = idParamSchema.parse(request.params); const body = reviewDecisionSchema.parse(request.body ?? {});
+    const result = context.db.transaction(() => {
+      const row = context.db.prepare("SELECT song_id AS songId, lyrics FROM lyric_submissions WHERE id = ? AND status = 'pending'").get(id) as { songId: number; lyrics: string } | undefined;
+      if (!row) return false;
+      const changed = context.db.prepare("UPDATE lyric_submissions SET status = 'approved', reviewed_by = ?, review_note = ?, reviewed_at = datetime('now') WHERE id = ? AND status = 'pending'").run(reviewer.id, body.reviewNote ?? null, id);
+      if (!changed.changes) return false;
+      context.db.prepare('UPDATE songs SET lyrics = ? WHERE id = ?').run(row.lyrics, row.songId); rebuildSongSearchIndex(context.db, row.songId); return true;
+    })();
+    if (!result) return reply.code(409).send({ code: 'REVIEW_ALREADY_RESOLVED', message: '这条歌词审核已被处理。' });
+    return { ok: true };
+  });
+
+  app.post('/api/reviews/lyrics/:id/reject', { preHandler: requireReviewer }, async (request, reply) => {
+    const reviewer = currentUser(request); const { id } = idParamSchema.parse(request.params); const body = reviewDecisionSchema.parse(request.body ?? {});
+    const result = context.db.prepare("UPDATE lyric_submissions SET status = 'rejected', reviewed_by = ?, review_note = ?, reviewed_at = datetime('now') WHERE id = ? AND status = 'pending'").run(reviewer.id, body.reviewNote ?? null, id);
+    if (!result.changes) return reply.code(409).send({ code: 'REVIEW_ALREADY_RESOLVED', message: '这条歌词审核已被处理。' });
     return { ok: true };
   });
 
@@ -1093,14 +1639,16 @@ export async function buildApp(context: AppContext) {
     const timezoneModifier = `${-query.timezoneOffset} minutes`;
     const historyCte = `
       WITH history AS (
-        SELECT 'event:' || e.id AS id, e.song_id AS songId, s.title, s.artist, s.version,
+        SELECT 'event:' || e.id AS id, e.song_id AS songId, s.title, s.artist, s.version, s.album,
+          CASE WHEN EXISTS(SELECT 1 FROM song_covers sc WHERE sc.song_id = s.id) THEN '/api/songs/' || s.id || '/cover' END AS coverUrl,
           e.status AS status, coalesce(e.completed_at, e.created_at) AS occurredAt,
           p.rating_snapshot AS rating, coalesce(p.note, e.note) AS note
         FROM pick_events e JOIN songs s ON s.id = e.song_id
         LEFT JOIN plays p ON p.pick_event_id = e.id
         WHERE e.user_id = @userId AND e.status IN ('played', 'skipped')
         UNION ALL
-        SELECT 'play:' || p.id, p.song_id, s.title, s.artist, s.version,
+        SELECT 'play:' || p.id, p.song_id, s.title, s.artist, s.version, s.album,
+          CASE WHEN EXISTS(SELECT 1 FROM song_covers sc WHERE sc.song_id = s.id) THEN '/api/songs/' || s.id || '/cover' END,
           'played', p.played_at, p.rating_snapshot, p.note
         FROM plays p JOIN songs s ON s.id = p.song_id
         WHERE p.user_id = @userId AND p.pick_event_id IS NULL
@@ -1131,7 +1679,9 @@ export async function buildApp(context: AppContext) {
     const user = currentUser(request);
     const playlist = context.db.prepare(`SELECT id, name FROM playlists WHERE owner_id = ? AND kind = 'next_ktv'`).get(user.id) as any;
     const songs = playlist ? context.db.prepare(`
-      SELECT s.id, s.title, s.artist, s.version FROM playlist_songs ps JOIN songs s ON s.id = ps.song_id
+      SELECT s.id, s.title, s.artist, s.version, s.album,
+        CASE WHEN EXISTS(SELECT 1 FROM song_covers sc WHERE sc.song_id = s.id) THEN '/api/songs/' || s.id || '/cover' END AS coverUrl
+        FROM playlist_songs ps JOIN songs s ON s.id = ps.song_id
       WHERE ps.playlist_id = ? ORDER BY ps.position, ps.created_at
     `).all(playlist.id) : [];
     return { playlist, songs };
@@ -1170,7 +1720,7 @@ export async function buildApp(context: AppContext) {
   });
 
   const playlistAccess = (playlistId: number, userId: number) => context.db.prepare(`
-    SELECT pl.id, pl.name, pl.owner_id AS ownerId, owner.username AS ownerName,
+    SELECT pl.id, pl.name, pl.owner_id AS ownerId, coalesce(owner.nickname, owner.username) AS ownerName,
       CASE WHEN pl.owner_id = @userId THEN 'owner' ELSE 'collaborator' END AS access
     FROM playlists pl JOIN users owner ON owner.id = pl.owner_id
     WHERE pl.id = @playlistId AND pl.kind = 'normal' AND (
@@ -1183,7 +1733,7 @@ export async function buildApp(context: AppContext) {
   app.get('/api/playlists', { preHandler: requireUser }, async (request) => {
     const user = currentUser(request);
     return { playlists: context.db.prepare(`
-      SELECT pl.id, pl.name, owner.username AS ownerName,
+      SELECT pl.id, pl.name, coalesce(owner.nickname, owner.username) AS ownerName,
         CASE WHEN pl.owner_id = @userId THEN 'owner' ELSE 'collaborator' END AS access,
         count(DISTINCT ps.song_id) AS songCount, count(DISTINCT members.user_id) AS collaboratorCount
       FROM playlists pl JOIN users owner ON owner.id = pl.owner_id
@@ -1219,9 +1769,9 @@ export async function buildApp(context: AppContext) {
     const user = currentUser(request);
     const query = z.object({ q: z.string().trim().max(40).default('') }).parse(request.query);
     return { users: context.db.prepare(`
-      SELECT id, username FROM users WHERE id <> @userId AND is_system = 0
-        AND (@query = '' OR username LIKE @term)
-      ORDER BY username COLLATE NOCASE LIMIT 20
+      SELECT id, coalesce(nickname, username) AS username, nickname, users.username AS loginUsername, coalesce(nickname, username) AS displayName FROM users WHERE id <> @userId AND is_system = 0
+        AND (@query = '' OR username LIKE @term OR coalesce(nickname, '') LIKE @term)
+      ORDER BY coalesce(nickname, username) COLLATE NOCASE LIMIT 20
     `).all({ userId: user.id, query: query.q, term: `%${query.q}%` }) };
   });
 
@@ -1231,11 +1781,13 @@ export async function buildApp(context: AppContext) {
     const playlist = playlistAccess(id, user.id);
     if (!playlist) return reply.code(404).send({ code: 'NOT_FOUND', message: '没有找到这个歌单或你无权查看。' });
     const songs = context.db.prepare(`
-      SELECT s.id, s.title, s.artist, s.version, ps.position FROM playlist_songs ps JOIN songs s ON s.id = ps.song_id
+      SELECT s.id, s.title, s.artist, s.version, s.album,
+        CASE WHEN EXISTS(SELECT 1 FROM song_covers sc WHERE sc.song_id = s.id) THEN '/api/songs/' || s.id || '/cover' END AS coverUrl,
+        ps.position FROM playlist_songs ps JOIN songs s ON s.id = ps.song_id
       WHERE ps.playlist_id = ? AND s.status = 'active' ORDER BY ps.position, ps.created_at
     `).all(id);
     const collaborators = context.db.prepare(`
-      SELECT u.id, u.username FROM playlist_collaborators pc JOIN users u ON u.id = pc.user_id
+      SELECT u.id, coalesce(u.nickname, u.username) AS username, u.nickname, u.username AS loginUsername, coalesce(u.nickname, u.username) AS displayName FROM playlist_collaborators pc JOIN users u ON u.id = pc.user_id
       WHERE pc.playlist_id = ? ORDER BY pc.created_at
     `).all(id);
     return { playlist, songs, collaborators };
@@ -1315,6 +1867,8 @@ export async function buildApp(context: AppContext) {
 
   app.get('/api/reviews/count', { preHandler: requireReviewer }, async () => ({
     count: (context.db.prepare("SELECT count(*) AS count FROM song_submissions WHERE status = 'pending'").get() as { count: number }).count
+      + (context.db.prepare("SELECT count(*) AS count FROM song_deletion_requests WHERE status = 'pending'").get() as { count: number }).count
+      + (context.db.prepare("SELECT count(*) AS count FROM lyric_submissions WHERE status = 'pending'").get() as { count: number }).count
   }));
 
   app.get('/api/reviews', { preHandler: requireReviewer }, async (request) => {
@@ -1429,7 +1983,7 @@ export async function buildApp(context: AppContext) {
     return {
       exportedAt: new Date().toISOString(),
       songs: context.db.prepare(`
-        SELECT s.title, s.artist, s.version, s.language, s.genre, us.collection_type AS collectionType,
+        SELECT s.title, s.artist, s.version, s.album, s.language, s.genre, us.collection_type AS collectionType,
                m.rating, m.note, m.key_shift AS keyShift, m.memory_cue AS memoryCue
         FROM user_songs us JOIN songs s ON s.id = us.song_id
         LEFT JOIN song_user_meta m ON m.user_id = us.user_id AND m.song_id = us.song_id
@@ -1469,18 +2023,22 @@ export async function buildApp(context: AppContext) {
       return reply.sendFile('index.html');
     });
   }
+  recoverMtwImports();
   return app;
 }
 
-interface ImportEntry { title: string; artist: string; version?: string | undefined }
+interface ImportEntry { title: string; artist: string; version?: string | undefined; album?: string | undefined }
 
 /**
  * SQLite 用 0/1 保存布尔值。管理接口在统一出口完成类型归一化，避免各页面
  * 分别猜测数据库驱动的返回形式；同时把聚合查询可能返回的空值收敛为稳定值。
  */
 function normalizeAdminUser(user: any) {
+  const nickname = typeof user.nickname === 'string' && user.nickname.trim() ? user.nickname.trim() : null;
   return {
     ...user,
+    nickname,
+    displayName: nickname ?? user.username,
     isMaintainer: Boolean(user.isMaintainer),
     canAddSongs: Boolean(user.canAddSongs),
     personalSongCount: Number(user.personalSongCount ?? 0),
@@ -1490,7 +2048,7 @@ function normalizeAdminUser(user: any) {
 
 function parseImport(format: 'json' | 'csv' | 'text', content: string): ImportEntry[] {
   if (format === 'json') {
-    const value = z.array(z.object({ title: z.string().min(1), artist: z.string().min(1), version: z.string().optional() })).parse(JSON.parse(content));
+    const value = z.array(z.object({ title: z.string().min(1), artist: z.string().min(1), version: z.string().optional(), album: z.string().optional() })).parse(JSON.parse(content));
     return value;
   }
   const rows = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -1507,6 +2065,7 @@ function parseImport(format: 'json' | 'csv' | 'text', content: string): ImportEn
   const titleIndex = columns.indexOf('title');
   const artistIndex = columns.indexOf('artist');
   const versionIndex = columns.indexOf('version');
+  const albumIndex = columns.indexOf('album');
   if (titleIndex < 0 || artistIndex < 0) throw new Error('CSV 必须包含 title 和 artist 列。');
   return data.map((line) => {
     const values = parseCsvLine(line);
@@ -1514,7 +2073,8 @@ function parseImport(format: 'json' | 'csv' | 'text', content: string): ImportEn
     const artist = values[artistIndex]?.trim();
     if (!title || !artist) throw new Error('CSV 中存在缺少歌名或歌手的行。');
     const version = versionIndex >= 0 ? values[versionIndex]?.trim() : undefined;
-    return version ? { title, artist, version } : { title, artist };
+    const album = albumIndex >= 0 ? values[albumIndex]?.trim() : undefined;
+    return { title, artist, ...(version ? { version } : {}), ...(album ? { album } : {}) };
   });
 }
 

@@ -5,6 +5,7 @@ import { rebuildSongSearchIndex, rebuildUserSongSearchIndex } from '../search-in
 
 export interface CatalogCandidate extends SongIdentityInput {
   id: number;
+  album: string | null;
   language: string | null;
   genre: string | null;
   difficulty: 'easy' | 'medium' | 'hard' | null;
@@ -29,14 +30,14 @@ export class CatalogService {
   findCandidates(input: SongIdentityInput): { exact: CatalogCandidate | undefined; similar: CatalogCandidate[] } {
     const identity = normalizedSongIdentity(input);
     const exact = this.db.prepare(`
-      SELECT id, title, artist, version, language, genre, difficulty,
+      SELECT id, title, artist, version, album, language, genre, difficulty,
              performance_type AS performanceType
       FROM songs
       WHERE status = 'active' AND normalized_title = @title
         AND normalized_artist = @artist AND normalized_version = @version
     `).get(identity) as CatalogCandidate | undefined;
     const candidates = this.db.prepare(`
-      SELECT id, title, artist, version, language, genre, difficulty,
+      SELECT id, title, artist, version, album, language, genre, difficulty,
              performance_type AS performanceType
       FROM songs
       WHERE status = 'active' AND id <> coalesce(@exactId, -1)
@@ -74,14 +75,14 @@ export class CatalogService {
     return true;
   }
 
-  createSong(input: SongIdentityInput & { language?: string | null | undefined; genre?: string | null | undefined; difficulty?: string | null | undefined; performanceType: string; lyrics?: string | null | undefined; lyricsTranslit?: string | null | undefined; addedBy: number }): number {
+  createSong(input: SongIdentityInput & { album?: string | null | undefined; language?: string | null | undefined; genre?: string | null | undefined; difficulty?: string | null | undefined; performanceType: string; lyrics?: string | null | undefined; lyricsTranslit?: string | null | undefined; addedBy: number }): number {
     const identity = normalizedSongIdentity(input);
     const index = buildSongIndex(input.title);
     const result = this.db.prepare(`
-      INSERT INTO songs(title, artist, version, normalized_title, normalized_artist, normalized_version,
+      INSERT INTO songs(title, artist, version, album, normalized_title, normalized_artist, normalized_version,
         language, genre, difficulty, performance_type, lyrics, lyrics_translit, pinyin, title_initial, added_by)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(input.title, input.artist, input.version ?? null, identity.title, identity.artist, identity.version,
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(input.title, input.artist, input.version ?? null, input.album ?? null, identity.title, identity.artist, identity.version,
       input.language ?? null, input.genre ?? null, input.difficulty ?? null, input.performanceType,
       input.lyrics ?? null, input.lyricsTranslit ?? null, index.pinyin, index.titleInitial, input.addedBy);
     const songId = Number(result.lastInsertRowid);
