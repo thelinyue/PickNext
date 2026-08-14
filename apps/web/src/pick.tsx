@@ -28,7 +28,7 @@ export interface PickController {
   dismissSkipSuggestion(): void;
   emptyMessage: string;
   pick(continueFromRepertoire?: boolean): Promise<void>;
-  complete(rating?: number, note?: string, keyShift?: number): Promise<void>;
+  complete(rating?: number, note?: string, keyShift?: number): Promise<boolean>;
   endSession(): Promise<void>;
   refreshContext(): Promise<void>;
 }
@@ -100,7 +100,7 @@ export function usePickController(notify: (message: string) => void, enabled = t
   }, [current?.eventId, requestNext]);
 
   const complete = useCallback(async (rating?: number, note?: string, keyShift?: number) => {
-    if (!current || busyRef.current) return;
+    if (!current || busyRef.current) return false;
     busyRef.current = true;
     setBusy(true);
     setOperation('saving');
@@ -120,15 +120,16 @@ export function usePickController(notify: (message: string) => void, enabled = t
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : '记录失败，请重试');
     } finally { busyRef.current = false; setBusy(false); setOperation('idle'); }
-    if (!saved) return;
+    if (!saved) return false;
     setCurrent(null);
     if (completed.source === 'ktv' && completed.candidateCount === 1) {
       setKtvExhausted(true); setExhaustedOpen(true);
       await client.invalidateQueries({ queryKey: ['pick-context'] });
-      return;
+      return true;
     }
     setEmptyMessage('上一首已保存，正在加载下一首。');
     await requestNext();
+    return true;
   }, [client, current, notify, requestNext]);
 
   const endSession = useCallback(async () => {
@@ -159,6 +160,7 @@ export function PickPage({ notify, controller, onOpenGlobalLibrary, canAddSongs 
   const { current, sessionId, context, contextError, filters, setFilters, avoidRecent, setAvoidRecent, busy, initializing, operation, exhausted, ktvExhausted, exhaustedOpen, setExhaustedOpen, skipSuggestion, dismissSkipSuggestion, emptyMessage, pick, complete, endSession, refreshContext } = controller;
   const [filterOpen, setFilterOpen] = useState(false);
   const [completeOpen, setCompleteOpen] = useState(false);
+  const [completeError, setCompleteError] = useState<string | null>(null);
   const [karaokeOpen, setKaraokeOpen] = useState(false);
   const [skipActionBusy, setSkipActionBusy] = useState<'snooze' | 'learning' | 'keep' | null>(null);
   const [lyricsCandidates, setLyricsCandidates] = useState<Array<{ id: string; title: string; artist: string; album: string; lyrics: string }> | null>(null);
@@ -184,8 +186,17 @@ export function PickPage({ notify, controller, onOpenGlobalLibrary, canAddSongs 
       setLyricsCandidates(null); await lyrics.refetch(); notify(result.status === 'approved' ? 'MTW 歌词已保存。' : '歌词已提交审核。');
     } catch (reason) { notify(reason instanceof Error ? reason.message : '保存歌词失败'); }
   };
-  const finish = async (rating?: number, note?: string, keyShift?: number) => { await complete(rating, note, keyShift); setCompleteOpen(false); };
-  const requestComplete = () => current?.song.rating ? void finish() : setCompleteOpen(true);
+  const finish = async (rating?: number, note?: string, keyShift?: number) => {
+    setCompleteError(null);
+    const saved = await complete(rating, note, keyShift);
+    if (saved) setCompleteOpen(false);
+    else { setCompleteError('记录失败，数据未保存，请重试'); setCompleteOpen(true); }
+  };
+  const requestComplete = () => {
+    setCompleteError(null);
+    if (current?.song.rating) void finish();
+    else setCompleteOpen(true);
+  };
   const preview = useMemo(() => readableLyricLines(lyrics.data?.lyrics ?? '').slice(0, 3), [lyrics.data?.lyrics]);
   const resolveSkipSuggestion = async (action: 'snooze' | 'learning' | 'keep') => {
     if (!skipSuggestion || skipActionBusy) return;
@@ -212,9 +223,9 @@ export function PickPage({ notify, controller, onOpenGlobalLibrary, canAddSongs 
         ? <FirstUseGuide globalCount={context.counts.global} canAddSongs={canAddSongs} onOpenGlobalLibrary={onOpenGlobalLibrary} />
         : <EmptyState title={exhausted ? '本场候选已完成' : '准备好了吗？'} description={exhausted ? emptyMessage : `${emptyMessage} 点击下方 Pick 开始。`} />;
 
-  return <section className="page pick-page"><PageHeader eyebrow="感知随机 · 本场不重复" title="下一首唱什么" action={<IconButton label="筛选" onClick={() => setFilterOpen(true)}><SlidersHorizontal /></IconButton>} />
+  return <section className="page pick-page"><PageHeader eyebrow="根据你的曲库来选" title="下一首唱什么" action={<IconButton label="筛选" onClick={() => setFilterOpen(true)}><SlidersHorizontal /></IconButton>} />
     {context && context.counts.nextKtv > 0 && <p className="pick-ktv-status"><Mic2 size={15} />下一次 KTV · 剩余 {context.counts.nextKtv} 首</p>}
-    <div className="pick-stage"><AnimatePresence mode="wait">{current ? <motion.article key={current.eventId} className="pick-card" initial={{ opacity: 0, y: 28, rotate: -1 }} animate={{ opacity: 1, y: 0, rotate: 0 }} exit={{ opacity: 0, y: -20, scale: .97 }}>
+    <div className="pick-stage"><AnimatePresence mode="wait">{current ? <motion.article key={current.eventId} className="pick-card" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}>
       <div className="vinyl"><CoverImage className="vinyl-cover" url={current.song.coverUrl} alt={`${current.song.title}封面`} /></div><p className="pick-reason">{current.reason}</p><h2>{current.song.title}</h2><h3>{current.song.artist}{current.song.version ? ` · ${current.song.version}` : ''}</h3><div className="pick-meta"><span>{current.song.album ?? '专辑未填'}</span><span>{current.song.language ?? '语种未填'}</span><span>{current.song.genre ?? '曲风未填'}</span>{current.song.keyShift !== null && <span>{current.song.keyShift > 0 ? '+' : ''}{current.song.keyShift} Key</span>}</div>
       <button className={`pick-lyrics-preview ${preview.length ? '' : 'empty'}`} onClick={() => preview.length ? setKaraokeOpen(true) : void fetchLyrics()}><Subtitles size={17} /><span>{preview.length ? preview.map((line) => <i key={line}>{line}</i>) : <i>暂无歌词</i>}</span><b>{preview.length ? '歌词计时跟唱' : '从 MTW 获取'}</b></button>
       <p className="candidate-count">本轮候选 {current.candidateCount} 首 · {current.algorithmVersion}</p>
@@ -222,7 +233,7 @@ export function PickPage({ notify, controller, onOpenGlobalLibrary, canAddSongs 
     </motion.article> : <motion.div key="empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>{empty}</motion.div>}</AnimatePresence></div>
     {sessionId && <button className="text-action" disabled={busy} onClick={endSession}>{operation === 'ending' ? '正在结束…' : '结束本场'} <ChevronRight size={16} /></button>}
     <FilterSheet open={filterOpen} onOpenChange={setFilterOpen} filters={filters} setFilters={setFilters} avoidRecent={avoidRecent} setAvoidRecent={setAvoidRecent} facets={context?.facets ?? { languages: [], genres: [] }} onApply={() => { setFilterOpen(false); if (exhausted) { setExhaustedOpen(false); void pick(); } else notify('筛选将在下一次 Pick 生效'); }} />
-    <CompleteSheet open={completeOpen} onOpenChange={setCompleteOpen} onComplete={finish} busy={busy} />
+    <CompleteSheet open={completeOpen} onOpenChange={(open) => { setCompleteOpen(open); if (open) setCompleteError(null); }} onComplete={finish} error={completeError} busy={busy} />
     <SkipSuggestionSheet suggestion={skipSuggestion} busy={skipActionBusy} onOpenChange={(open) => { if (!open) dismissSkipSuggestion(); }} onAction={(action) => void resolveSkipSuggestion(action)} />
     <Sheet open={exhaustedOpen} onOpenChange={setExhaustedOpen} title={ktvExhausted ? '下一次 KTV 已唱完' : '本场已经唱完'}><div className="sheet-stack"><p className="helper">{ktvExhausted ? '准备的 KTV 歌曲已经全部处理完，可以继续从会唱曲库 Pick，或结束本场。' : '当前条件下没有尚未抽取的歌曲。本场不会重复推荐已经抽取过的歌曲。'}</p>{ktvExhausted ? <Button onClick={() => void pick(true)}><Mic2 size={18} />继续唱会唱曲库</Button> : <Button onClick={() => { setExhaustedOpen(false); setFilterOpen(true); }}><SlidersHorizontal size={18} />调整筛选继续</Button>}<Button className="secondary" loading={operation === 'ending'} onClick={() => void endSession()}><Check size={18} />结束本场</Button></div></Sheet>
     <KaraokeOverlay open={karaokeOpen} song={current ? { id: current.song.id, title: current.song.title, artist: current.song.artist } : null} lyrics={lyrics.data?.lyrics ?? ''} onClose={() => setKaraokeOpen(false)} onComplete={() => { setKaraokeOpen(false); requestComplete(); }} onNext={() => { setKaraokeOpen(false); void pick(); }} notify={notify} />
@@ -309,9 +320,9 @@ function FilterGroup({ title, values, selected, onToggle }: { title: string; val
   return <fieldset className="filter-group"><legend>{title}</legend><div className="chips">{values.map(([value, label]) => <button type="button" className={selected.includes(value) ? 'selected' : ''} key={value} onClick={() => onToggle(value)}>{label}</button>)}</div></fieldset>;
 }
 
-function CompleteSheet({ open, onOpenChange, onComplete, busy }: { open: boolean; onOpenChange(open: boolean): void; onComplete(rating: number, note?: string, keyShift?: number): void; busy: boolean }) {
+function CompleteSheet({ open, onOpenChange, onComplete, error, busy }: { open: boolean; onOpenChange(open: boolean): void; onComplete(rating: number, note?: string, keyShift?: number): Promise<void>; error: string | null; busy: boolean }) {
   const [rating, setRating] = useState(4); const [note, setNote] = useState(''); const [keyShift, setKeyShift] = useState(0);
-  return <Sheet open={open} onOpenChange={onOpenChange} title="第一次唱完"><div className="sheet-stack"><p className="helper">请选择长期演唱把握，这会帮助以后筛选歌曲。</p><div className="rating" aria-label="长期演唱把握">{[1,2,3,4,5].map((value) => <button key={value} onClick={() => setRating(value)} className={value <= rating ? 'active' : ''}>★</button>)}</div><details className="complete-details"><summary>补充记录（选填）</summary><div className="sheet-stack"><label>个人升降调<select value={keyShift} onChange={(event) => setKeyShift(Number(event.target.value))}>{Array.from({ length: 13 }, (_, index) => index - 6).map((value) => <option key={value} value={value}>{value > 0 ? '+' : ''}{value} Key</option>)}</select></label><label>本次备注<textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="今天高音有点紧……" /></label></div></details><Button loading={busy} onClick={() => onComplete(rating, note, keyShift)}><Check />保存并下一首</Button></div></Sheet>;
+  return <Sheet open={open} onOpenChange={onOpenChange} title="第一次唱完"><div className="sheet-stack"><p className="helper">请选择长期演唱把握，这会帮助以后筛选歌曲。</p><div className="rating" aria-label="长期演唱把握">{[1,2,3,4,5].map((value) => <button key={value} onClick={() => setRating(value)} className={value <= rating ? 'active' : ''}>★</button>)}</div><details className="complete-details"><summary>补充记录（选填）</summary><div className="sheet-stack"><label>个人升降调<select value={keyShift} onChange={(event) => setKeyShift(Number(event.target.value))}>{Array.from({ length: 13 }, (_, index) => index - 6).map((value) => <option key={value} value={value}>{value > 0 ? '+' : ''}{value} Key</option>)}</select></label><label>本次备注<textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="今天高音有点紧……" /></label></div></details>{error && <p className="form-error" role="alert">{error}</p>}<Button loading={busy} onClick={() => void onComplete(rating, note, keyShift)}><Check />保存并下一首</Button></div></Sheet>;
 }
 
 export function SkipSuggestionSheet({ suggestion, busy, onOpenChange, onAction }: { suggestion: PickResponse['skipSuggestion']; busy: 'snooze' | 'learning' | 'keep' | null; onOpenChange(open: boolean): void; onAction(action: 'snooze' | 'learning' | 'keep'): void }) {

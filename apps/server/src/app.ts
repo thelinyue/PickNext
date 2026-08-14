@@ -40,6 +40,7 @@ import {
   updateSongUserMetaSchema,
   updateSongSchema
 } from '@picknext/shared';
+import type { SearchSongsMetaResponse } from '@picknext/shared';
 import { hashPassword, verifyPassword } from './auth.js';
 import { AuditLogError, AuditLogger } from './audit.js';
 import { ImportTaskQueue } from './import-task-queue.js';
@@ -47,6 +48,7 @@ import { LoginRateLimiter } from './login-rate-limit.js';
 import { PickError, PickService } from './pick-service.js';
 import { buildSongIndex, normalizedSongIdentity } from './song-utils.js';
 import { rebuildSongSearchIndex, rebuildUserSongSearchIndex, toFtsQuery } from './search-index.js';
+import { searchSongsMeta, searchSongsQuick, type SearchQuery } from './search-service.js';
 import { CatalogService, type CatalogCandidate } from './services/catalog-service.js';
 import { CoverStorage } from './services/cover-storage.js';
 import { MtwClient, type MtwScanProgress } from './services/mtw-client.js';
@@ -134,6 +136,14 @@ export async function buildApp(context: AppContext) {
   const audit = new AuditLogger(context.db);
   const loginLimiter = new LoginRateLimiter();
   const sessionSecret = getOrCreateSessionSecret(context.db);
+  const searchMetaCache = new Map<string, { expiresAt: number; value: SearchSongsMetaResponse }>();
+  const invalidateSearchMeta = (userId?: number) => {
+    if (userId === undefined) {
+      searchMetaCache.clear();
+      return;
+    }
+    for (const key of searchMetaCache.keys()) if (key.startsWith(`${userId}|`)) searchMetaCache.delete(key);
+  };
   const readMtwSettings = () => ({
     baseUrl: (context.db.prepare("SELECT value FROM app_settings WHERE key = 'mtw_base_url'").get() as { value: string } | undefined)?.value ?? '',
     token: (context.db.prepare("SELECT value FROM app_settings WHERE key = 'mtw_token'").get() as { value: string } | undefined)?.value ?? '',
@@ -145,11 +155,14 @@ export async function buildApp(context: AppContext) {
     if (!settings.baseUrl) throw new Error('尚未配置 MTW 服务地址。');
     return new MtwClient(settings);
   };
-  const invalidateQueues = (userId: number) => context.db.prepare(`
-    UPDATE pick_queue_items SET status = 'invalidated' WHERE status = 'pending' AND session_id IN (
-      SELECT id FROM pick_sessions WHERE user_id = ? AND ended_at IS NULL
-    )
-  `).run(userId).changes;
+  const invalidateQueues = (userId: number) => {
+    invalidateSearchMeta(userId);
+    return context.db.prepare(`
+      UPDATE pick_queue_items SET status = 'invalidated' WHERE status = 'pending' AND session_id IN (
+        SELECT id FROM pick_sessions WHERE user_id = ? AND ended_at IS NULL
+      )
+    `).run(userId).changes;
+  };
   const processImportTask = async (taskId: string): Promise<void> => {
     const task = context.db.prepare('SELECT user_id AS userId, payload, status FROM tasks WHERE id = ? AND type = \'song_import\'').get(taskId) as {
       userId: number;
@@ -1060,9 +1073,30 @@ export async function buildApp(context: AppContext) {
       catalog.collectUserSong(user.id, songId, personalPayload);
       return { songId, status };
     })();
+    if (result.status === 'created') invalidateSearchMeta();
     return reply.code(result.status === 'created' ? 201 : 200).send(result);
   });
 
+  /** 首屏歌曲接口不执行总数、筛选项和字母索引查询，避免全部曲库被慢元数据拖住。 */
+  app.get('/api/search/quick', { preHandler: requireUser }, async (request) => {
+    const user = currentUser(request);
+    const query = searchSongsQuerySchema.parse(request.query) as SearchQuery;
+    return searchSongsQuick(context.db, user.id, query);
+  });
+
+  /** 元数据允许独立失败，并按用户和完整筛选条件短时缓存，不能跨用户复用。 */
+  app.get('/api/search/meta', { preHandler: requireUser }, async (request) => {
+    const user = currentUser(request);
+    const query = searchSongsQuerySchema.parse(request.query) as SearchQuery;
+    const cacheKey = `${user.id}|${JSON.stringify(query)}`;
+    const cached = searchMetaCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const value = searchSongsMeta(context.db, user.id, query);
+    searchMetaCache.set(cacheKey, { value, expiresAt: Date.now() + 20_000 });
+    return value;
+  });
+
+  /** 旧接口继续保留完整响应，供旧客户端和后台测试兼容使用。 */
   app.get('/api/search', { preHandler: requireUser }, async (request) => {
     const user = currentUser(request);
     const query = searchSongsQuerySchema.parse(request.query);
@@ -1298,6 +1332,7 @@ export async function buildApp(context: AppContext) {
       for (const alias of body.aliases) aliasInsert.run(id, alias);
     }
     rebuildSongSearchIndex(context.db, id);
+    invalidateSearchMeta();
     audit.record({
       actorUserId: user.id,
       action: 'song_global_updated',
@@ -1319,6 +1354,7 @@ export async function buildApp(context: AppContext) {
     }
     context.db.prepare('UPDATE songs SET lyrics = ?, lyrics_translit = coalesce(?, lyrics_translit) WHERE id = ?').run(body.lyrics, body.lyricsTranslit ?? null, id);
     rebuildSongSearchIndex(context.db, id);
+    invalidateSearchMeta();
     return { ok: true };
   });
 

@@ -1,23 +1,30 @@
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Mic2 } from 'lucide-react';
 import { api, ApiError } from './api.js';
 import { AuthScreen } from './auth.js';
 import { AppShell, NetworkBanner, Toast, type NavigationPage, type PickNavState } from './components.js';
-import { LibraryPage, type SongPrefill } from './library.js';
+import type { SongPrefill } from './library.js';
 import { PickPage, usePickController } from './pick.js';
-import { MePage } from './me.js';
-import { AdminConsole } from './admin-console.js';
+
+// Pick 是歌手端首屏任务，保持静态加载；其余页面按需加载，避免首屏带入后台和详情表单代码。
+const LazyLibraryPage = lazy(() => import('./library.js').then(({ LibraryPage }) => ({ default: LibraryPage })));
+const LazyMePage = lazy(() => import('./me.js').then(({ MePage }) => ({ default: MePage })));
+const LazyAdminConsole = lazy(() => import('./admin-console.js').then(({ AdminConsole }) => ({ default: AdminConsole })));
 
 interface User { id: number; username: string; nickname: string | null; displayName: string; avatarUrl: string | null; role: 'admin' | 'user'; isMaintainer: boolean; canAddSongs: boolean }
+
+function PageLoading({ label }: { label: string }) {
+  return <section className="page page-loading"><div className="page-loading-copy" role="status">正在打开{label}...</div></section>;
+}
 
 /** 将系统分享目标中的标题、文本转换为可编辑的收歌预填值，不在接收分享时直接写入数据库。 */
 export function parseSharedSong(params: URLSearchParams): SongPrefill | null {
   const title = params.get('title')?.trim() ?? '';
   const text = params.get('text')?.trim() ?? '';
-  const candidate = [text, title].find((value) => /\s*[-—|｜]\s*/.test(value)) ?? '';
+  const candidate = [text, title].find((value) => /\s*[-|｜]\s*/.test(value)) ?? '';
   const parts = (candidate || [title, text].filter(Boolean).join(' - '))
-    .split(/\s*[-—|｜]\s*/)
+    .split(/\s*[-|｜]\s*/)
     .map((value) => value.trim())
     .filter(Boolean);
   if (!parts.length) return null;
@@ -97,5 +104,6 @@ export default function App() {
   if (setup.isError) return <div className="fatal"><span>{setup.error instanceof Error ? setup.error.message : '无法连接 PickNext 服务。'}</span><button className="button" onClick={() => void setup.refetch()}>重新连接</button></div>;
   if (setup.data?.required || me.error instanceof ApiError && me.error.status === 401) return <AuthScreen setupRequired={Boolean(setup.data?.required)} registrationOpen={Boolean(setup.data?.registrationOpen)} onSuccess={refreshAuth} />;
   if (!me.data?.user) return <div className="fatal"><span>{me.error instanceof Error ? me.error.message : '读取账号信息失败。'}</span><button className="button" onClick={() => void me.refetch()}>重新连接</button></div>;
-  return <AppShell page={page} onNavigate={navigate} onPickAction={runPickAction} pickState={pickState}>{!online && <NetworkBanner />}{page === 'library' && <LibraryPage notify={notify} canEditGlobal={me.data.user.role === 'admin' || me.data.user.isMaintainer} initialScope={libraryScope} initialAddSong={sharedSong} onSharedSongConsumed={() => setSharedSong(null)} />}{page === 'pick' && <PickPage notify={notify} controller={pickController} onOpenGlobalLibrary={openGlobalLibrary} canAddSongs={me.data.user.canAddSongs} />}{page === 'me' && <MePage user={me.data.user} notify={notify} onOpenAdmin={openAdmin} onLogout={() => { client.clear(); location.reload(); }} />}{page === 'admin' && <AdminConsole user={me.data.user} onBack={closeAdmin} notify={notify} />}<Toast message={toast} /></AppShell>;
+  const pageLabel = page === 'library' ? '曲库' : page === 'me' ? '我的' : '管理后台';
+  return <AppShell page={page} onNavigate={navigate} onPickAction={runPickAction} pickState={pickState}>{!online && <NetworkBanner />}<Suspense fallback={<PageLoading label={pageLabel} />}>{page === 'library' && <LazyLibraryPage notify={notify} canEditGlobal={me.data.user.role === 'admin' || me.data.user.isMaintainer} initialScope={libraryScope} initialAddSong={sharedSong} onSharedSongConsumed={() => setSharedSong(null)} />}{page === 'pick' && <PickPage notify={notify} controller={pickController} onOpenGlobalLibrary={openGlobalLibrary} canAddSongs={me.data.user.canAddSongs} />}{page === 'me' && <LazyMePage user={me.data.user} notify={notify} onOpenAdmin={openAdmin} onLogout={() => { client.clear(); location.reload(); }} />}{page === 'admin' && <LazyAdminConsole user={me.data.user} onBack={closeAdmin} notify={notify} />}</Suspense><Toast message={toast} /></AppShell>;
 }

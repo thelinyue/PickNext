@@ -122,6 +122,26 @@ export const searchSongsResponseSchema = z.object({
 });
 export type SearchSongsResponse = z.infer<typeof searchSongsResponseSchema>;
 
+/** 歌曲优先加载接口只返回列表和分页状态，不等待统计元数据。 */
+export const searchSongsQuickResponseSchema = z.object({
+  songs: z.array(songListItemSchema),
+  hasMore: z.boolean()
+});
+export type SearchSongsQuickResponse = z.infer<typeof searchSongsQuickResponseSchema>;
+
+/** 曲库元数据独立加载，失败时不会影响已经显示的歌曲。 */
+export const searchSongsMetaResponseSchema = z.object({
+  total: z.number().int().nonnegative(),
+  counts: songLibraryCountsSchema,
+  facets: z.object({ languages: z.array(z.string()), genres: z.array(z.string()) }),
+  alphabetIndex: z.array(z.object({
+    initial: z.string().regex(/^[A-Z#]$/),
+    count: z.number().int().nonnegative(),
+    offset: z.number().int().nonnegative()
+  }))
+});
+export type SearchSongsMetaResponse = z.infer<typeof searchSongsMetaResponseSchema>;
+
 export interface LibraryFilters {
   languages: string[];
   genres: string[];

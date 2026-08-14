@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppShell, Button, EmptyState, NetworkBanner, Sheet, SongCard } from './components.js';
 import { FirstUseGuide, SkipSuggestionSheet } from './pick.js';
 import { parseSharedSong } from './App.js';
-import { ImportSheet } from './me.js';
+import { ImportSheet, MePage } from './me.js';
 import { AdminUsersPage } from './admin-users.js';
 import { AuthScreen } from './auth.js';
 
@@ -118,6 +118,22 @@ describe('基础界面组件', () => {
     expect(parseSharedSong(new URLSearchParams({ text: '晴天 - 周杰伦 - Live' }))).toEqual({ title: '晴天', artist: '周杰伦', version: 'Live' });
     expect(parseSharedSong(new URLSearchParams({ title: '富士山下', text: '陈奕迅' }))).toEqual({ title: '富士山下', artist: '陈奕迅' });
     expect(parseSharedSong(new URLSearchParams())).toBeNull();
+  });
+
+  it('个人页空歌单状态只保留一个新建歌单入口', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.includes('/api/history?')) return new Response(JSON.stringify({ summary: { playedTotal: 24, playedToday: 3, favoriteArtist: null } }), { status: 200, headers: { 'content-type': 'application/json' } });
+      if (path.includes('/api/playlists')) return new Response(JSON.stringify({ playlists: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      if (path.includes('/api/users/search')) return new Response(JSON.stringify({ users: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } });
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><MePage user={{ username: '测试', nickname: null, displayName: '测试', avatarUrl: null, role: 'admin', isMaintainer: false }} onLogout={vi.fn()} onOpenAdmin={vi.fn()} notify={vi.fn()} /></QueryClientProvider>);
+
+    expect(await screen.findByText('可以新建主题歌单，再邀请朋友一起维护。')).not.toBeNull();
+    expect(screen.getAllByRole('button', { name: '新建歌单' })).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: /新建第一张歌单/ })).toBeNull();
   });
 
   it('连续跳过建议提供三个可执行处理动作', () => {

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query';
 import * as Tabs from '@radix-ui/react-tabs';
 import { Archive, ChevronRight, Filter, ListChecks, ListPlus, Mic2, Pause, Pencil, Play, Plus, RotateCcw, Save, Search, Sparkles, Subtitles, Trash2, X } from 'lucide-react';
-import type { CollectionType, Difficulty, LibraryFilters, LibraryScene, PersonalSongListItem, SearchSongsResponse, SongListItem, SongListScope } from '@picknext/shared';
+import type { CollectionType, Difficulty, LibraryFilters, LibraryScene, PersonalSongListItem, SearchSongsMetaResponse, SearchSongsQuickResponse, SearchSongsResponse, SongListItem, SongListScope } from '@picknext/shared';
 import { api, ApiError } from './api.js';
 import { BasicSongCard, Button, EmptyState, IconButton, PageHeader, Sheet, SongCard } from './components.js';
 
@@ -31,15 +31,62 @@ const sceneOptions: Record<string, Array<[LibraryScene, string]>> = {
   global: [['all', '全部'], ['high', '⭐ 高分'], ['hard', '🔥 高难度'], ['new', '✨ 最近添加']]
 };
 
+/** 收录操作先更新当前曲库缓存，避免等待整页歌曲重新查询才看到结果。 */
+function markSongCollected(data: InfiniteData<SearchSongsQuickResponse> | undefined, songId: number, target: CollectionType): InfiniteData<SearchSongsQuickResponse> | undefined {
+  if (!data) return data;
+  return {
+    ...data,
+    pages: data.pages.map((page) => {
+      const current = page.songs.find((song) => song.id === songId);
+      if (!current || current.collectionType === target) return page;
+      return {
+        ...page,
+        songs: page.songs.map((song) => song.id === songId ? { ...song, collectionType: target } : song)
+      };
+    })
+  };
+}
+
+function updateLibraryCounts(counts: SearchSongsMetaResponse['counts'], previous: CollectionType | null, target: CollectionType): SearchSongsMetaResponse['counts'] {
+  if (previous === target) return counts;
+  const next = { ...counts };
+  if (previous) next[previous] = Math.max(0, next[previous] - 1);
+  else next.personal += 1;
+  next[target] += 1;
+  return next;
+}
+
+function useDebouncedValue<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delay);
+    return () => window.clearTimeout(timer);
+  }, [delay, value]);
+  return debounced;
+}
+
+function librarySearchParams(scope: SongListScope, collection: CollectionType, search: string, filters: LibraryFilters, offset?: number) {
+  const params = new URLSearchParams({ scope, q: search.trim(), limit: '30' });
+  if (offset !== undefined) params.set('offset', String(offset));
+  if (scope === 'personal') params.set('collection', collection);
+  if (filters.languages.length) params.set('languages', filters.languages.join(','));
+  if (filters.genres.length) params.set('genres', filters.genres.join(','));
+  if (filters.difficulties.length) params.set('difficulties', filters.difficulties.join(','));
+  if (filters.minRating) params.set('minRating', String(filters.minRating));
+  params.set('scene', filters.scene);
+  return params;
+}
+
 export function LibraryPage({ notify, canEditGlobal, initialScope = 'personal', initialAddSong, onSharedSongConsumed }: { notify(message: string): void; canEditGlobal: boolean; initialScope?: SongListScope; initialAddSong?: SongPrefill | null; onSharedSongConsumed?(): void }) {
   const client = useQueryClient();
   const [scope, setScope] = useState<SongListScope>(initialScope);
   const [collection, setCollection] = useState<CollectionType>('repertoire');
   const [addOpen, setAddOpen] = useState(false);
+  const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [ktvOpen, setKtvOpen] = useState(false);
   const [ktvAddOpen, setKtvAddOpen] = useState(false);
-  const [ktvSearch, setKtvSearch] = useState('');
+  const [ktvSearchInput, setKtvSearchInput] = useState('');
   const [clearKtvConfirm, setClearKtvConfirm] = useState(false);
   const [detail, setDetail] = useState<SongListItem | null>(null);
   const [editSong, setEditSong] = useState<SongListItem | null>(null);
@@ -52,38 +99,60 @@ export function LibraryPage({ notify, canEditGlobal, initialScope = 'personal', 
   const [jumpOffset, setJumpOffset] = useState(0);
   const [letterFeedback, setLetterFeedback] = useState<string | null>(null);
   const [helpTopic, setHelpTopic] = useState<LibraryHelpTopic | null>(null);
+  const [pendingCollectionId, setPendingCollectionId] = useState<number | null>(null);
+  const ktvSearch = useDebouncedValue(ktvSearchInput, 250);
   const viewKey = scope === 'global' ? 'global' : collection;
   const filters = filtersByView[viewKey] ?? emptyFilters();
   const serializedFilters = JSON.stringify(filters);
+  const searchPending = searchInput !== search;
   const list = useInfiniteQuery({
-    queryKey: ['library-search', scope, collection, search, serializedFilters, jumpOffset],
+    queryKey: ['library-search', 'quick', scope, collection, search, serializedFilters, jumpOffset],
     initialPageParam: jumpOffset,
-    queryFn: ({ pageParam }) => {
-      const params = new URLSearchParams({ scope, q: search.trim(), limit: '30', offset: String(pageParam) });
-      if (scope === 'personal') params.set('collection', collection);
-      if (filters.languages.length) params.set('languages', filters.languages.join(','));
-      if (filters.genres.length) params.set('genres', filters.genres.join(','));
-      if (filters.difficulties.length) params.set('difficulties', filters.difficulties.join(','));
-      if (filters.minRating) params.set('minRating', String(filters.minRating));
-      params.set('scene', filters.scene);
-      return api<SearchSongsResponse>(`/api/search?${params}`);
+    queryFn: ({ pageParam, signal }) => {
+      const params = librarySearchParams(scope, collection, search, filters, pageParam);
+      return api<SearchSongsQuickResponse>(`/api/search/quick?${params}`, { signal });
     },
+    placeholderData: keepPreviousData,
+    staleTime: 15_000,
     getNextPageParam: (lastPage, pages) => lastPage.hasMore
       ? jumpOffset + pages.reduce((total, page) => total + page.songs.length, 0)
       : undefined
+  });
+  const meta = useQuery({
+    queryKey: ['library-search', 'meta', scope, collection, search, serializedFilters],
+    queryFn: ({ signal }) => api<SearchSongsMetaResponse>(`/api/search/meta?${librarySearchParams(scope, collection, search, filters)}`, { signal }),
+    staleTime: 20_000,
+    retry: 1
   });
   const playlists = useQuery({ queryKey: ['playlists'], queryFn: () => api<{ playlists: PlaylistSummary[] }>('/api/playlists') });
   const ktv = useQuery({ queryKey: ['next-ktv'], queryFn: () => api<{ playlist: { id: number; name: string } | null; songs: KtvSong[] }>('/api/playlists/next-ktv') });
   const ktvCandidates = useQuery({
     queryKey: ['ktv-candidates', ktvSearch],
     enabled: ktvAddOpen,
-    queryFn: () => api<SearchSongsResponse>(`/api/search?scope=personal&collection=repertoire&limit=100&q=${encodeURIComponent(ktvSearch.trim())}`)
+    queryFn: ({ signal }) => api<SearchSongsResponse>(`/api/search?scope=personal&collection=repertoire&limit=100&q=${encodeURIComponent(ktvSearch.trim())}`, { signal })
   });
   const shown = list.data?.pages.flatMap((page) => page.songs) ?? [];
-  const counts = list.data?.pages[0]?.counts;
-  const resultMeta = list.data?.pages[0];
+  const counts = meta.data?.counts;
+  const resultMeta = meta.data;
+  const libraryCount = (value: number | undefined) => value === undefined ? '...' : value;
+  const hasSearchOrFilters = Boolean(search.trim()) || activeFilterCount(filters) > 0;
 
   useEffect(() => { if (initialAddSong) setAddOpen(true); }, [initialAddSong]);
+  useEffect(() => {
+    if (searchInput === search) return;
+    const timer = window.setTimeout(() => setSearch(searchInput), 250);
+    return () => window.clearTimeout(timer);
+  }, [searchInput, search]);
+  useEffect(() => {
+    if (scope !== 'personal' || search.trim() || activeFilterCount(filters) > 0) return;
+    const params = librarySearchParams('global', collection, '', emptyFilters(), 0);
+    void client.prefetchInfiniteQuery({
+      queryKey: ['library-search', 'quick', 'global', collection, '', JSON.stringify(emptyFilters()), 0],
+      initialPageParam: 0,
+      queryFn: () => api<SearchSongsQuickResponse>(`/api/search/quick?${params}`),
+      staleTime: 15_000
+    });
+  }, [client, collection, filters, scope, search]);
   useEffect(() => {
     if (!helpTopic) return;
     const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setHelpTopic(null); };
@@ -93,11 +162,39 @@ export function LibraryPage({ notify, canEditGlobal, initialScope = 'personal', 
 
   const updateCollection = useMutation({
     mutationFn: ({ id, target }: { id: number; target: CollectionType }) => api(`/api/user-songs/${id}/collection`, { method: 'PUT', body: JSON.stringify({ collectionType: target }) }),
-    onSuccess: async (_result, variables) => {
-      await client.invalidateQueries({ queryKey: ['library-search'] });
+    onMutate: ({ id, target }) => {
+      const quickSnapshots = client.getQueriesData<InfiniteData<SearchSongsQuickResponse>>({ queryKey: ['library-search', 'quick'] });
+      const metaSnapshots = client.getQueriesData<SearchSongsMetaResponse>({ queryKey: ['library-search', 'meta'] });
+      const previousDetail = detail;
+      const previousCollectionType = previousDetail?.id === id
+        ? previousDetail.collectionType
+        : quickSnapshots.flatMap(([, data]) => data?.pages.flatMap((page) => page.songs) ?? []).find((song) => song.id === id)?.collectionType ?? null;
+
+      for (const [queryKey, data] of quickSnapshots) client.setQueryData(queryKey, markSongCollected(data, id, target));
+      for (const [queryKey, data] of metaSnapshots) {
+        if (data) client.setQueryData(queryKey, { ...data, counts: updateLibraryCounts(data.counts, previousCollectionType, target) });
+      }
+      if (previousDetail?.id === id) setDetail({ ...previousDetail, collectionType: target });
+      setPendingCollectionId(id);
+      return { quickSnapshots, metaSnapshots, previousDetail };
+    },
+    onSuccess: (_result, variables) => {
       setDetail(null);
       notify(variables.target === 'repertoire' ? '已加入会唱曲库' : '已加入待学清单');
-    }
+      void Promise.all([
+        client.invalidateQueries({ queryKey: ['library-search'], refetchType: 'active' }),
+        client.invalidateQueries({ queryKey: ['library-summary'] }),
+        client.invalidateQueries({ queryKey: ['pick-context'] }),
+        client.invalidateQueries({ queryKey: ['me'] })
+      ]);
+    },
+    onError: (reason, _variables, context) => {
+      context?.quickSnapshots.forEach(([queryKey, data]) => client.setQueryData(queryKey, data));
+      context?.metaSnapshots.forEach(([queryKey, data]) => client.setQueryData(queryKey, data));
+      if (context?.previousDetail) setDetail(context.previousDetail);
+      notify(reason instanceof Error ? reason.message : '收录失败，请重试');
+    },
+    onSettled: () => setPendingCollectionId(null)
   });
   const batchUpdate = useMutation({
     mutationFn: (body: { action: 'set_collection' | 'snooze' | 'unsnooze' | 'remove'; collectionType?: CollectionType; until?: string }) => api<{ updated: number }>('/api/user-songs/batch', {
@@ -162,30 +259,36 @@ export function LibraryPage({ notify, canEditGlobal, initialScope = 'personal', 
 
   return <section className="page library-page"><PageHeader eyebrow="你的歌，随时想得起来" title="曲库" action={<div className="library-header-actions">{scope === 'personal' && <Button className="secondary compact" onClick={() => selectionMode ? leaveSelectionMode() : setSelectionMode(true)}><ListChecks size={17} />{selectionMode ? '取消批量' : '批量管理'}</Button>}<IconButton label="添加歌曲" onClick={() => setAddOpen(true)}><Plus /></IconButton></div>} />
     <button className="ktv-card" onClick={() => setKtvOpen(true)}><span className="ktv-icon"><Mic2 /></span><span className="ktv-copy"><strong>下一次 KTV</strong><small>{ktv.data?.songs.length ? `已经准备 ${ktv.data.songs.length} 首 · Pick 时优先` : '先攒几首想唱的歌，Pick 时优先'}</small></span><span className="ktv-count">{ktv.data?.songs.length ?? 0}</span><ChevronRight size={19} /></button>
-    <div className="library-search-row"><div className="search-box"><Search size={19} /><input aria-label="搜索歌曲" placeholder="歌名、歌手、拼音或别名" value={search} onChange={(event) => setSearch(event.target.value)} /></div><IconButton label="筛选歌曲" onClick={() => setFiltersOpen(true)}><Filter />{activeFilterCount(filters) > 0 && <small className="filter-count">{activeFilterCount(filters)}</small>}</IconButton></div>
-    <Tabs.Root value={scope} onValueChange={changeScope}><Tabs.List className="tabs scope-tabs" aria-label="曲库范围"><Tabs.Trigger value="personal">我的曲库 <small>{counts?.personal ?? 0}</small></Tabs.Trigger><LibraryHelpTab value="global" topic="global" openTopic={helpTopic} message={libraryHelpMessages.global} onToggle={toggleHelp}>全部曲库 <small>{counts?.global ?? 0}</small></LibraryHelpTab></Tabs.List></Tabs.Root>
-    {scope === 'personal' && <Tabs.Root value={collection} onValueChange={changeCollection}><Tabs.List className="tabs collection-tabs" aria-label="个人曲库分类"><LibraryHelpTab value="repertoire" topic="repertoire" openTopic={helpTopic} message={libraryHelpMessages.repertoire} onToggle={toggleHelp}>会唱 <small>{counts?.repertoire ?? 0}</small></LibraryHelpTab><LibraryHelpTab value="learning" topic="learning" openTopic={helpTopic} message={libraryHelpMessages.learning} onToggle={toggleHelp}>待学 <small>{counts?.learning ?? 0}</small></LibraryHelpTab></Tabs.List></Tabs.Root>}
+    <div className="library-search-row"><div className="search-box"><Search size={19} /><input aria-label="搜索歌曲" placeholder="歌名、歌手、拼音或别名" value={searchInput} onChange={(event) => setSearchInput(event.target.value)} /></div><IconButton label="筛选歌曲" onClick={() => setFiltersOpen(true)}><Filter />{activeFilterCount(filters) > 0 && <small className="filter-count">{activeFilterCount(filters)}</small>}</IconButton></div>
+    <Tabs.Root value={scope} onValueChange={changeScope}><Tabs.List className="tabs scope-tabs" aria-label="曲库范围"><Tabs.Trigger value="personal">我的曲库 <small>{libraryCount(counts?.personal)}</small></Tabs.Trigger><LibraryHelpTab value="global" topic="global" openTopic={helpTopic} message={libraryHelpMessages.global} onToggle={toggleHelp}>全部曲库 <small>{libraryCount(counts?.global)}</small></LibraryHelpTab></Tabs.List></Tabs.Root>
+    {scope === 'personal' && <Tabs.Root value={collection} onValueChange={changeCollection}><Tabs.List className="tabs collection-tabs" aria-label="个人曲库分类"><LibraryHelpTab value="repertoire" topic="repertoire" openTopic={helpTopic} message={libraryHelpMessages.repertoire} onToggle={toggleHelp}>会唱 <small>{libraryCount(counts?.repertoire)}</small></LibraryHelpTab><LibraryHelpTab value="learning" topic="learning" openTopic={helpTopic} message={libraryHelpMessages.learning} onToggle={toggleHelp}>待学 <small>{libraryCount(counts?.learning)}</small></LibraryHelpTab></Tabs.List></Tabs.Root>}
     <div className="scene-chips" aria-label="快捷筛选">{(sceneOptions[viewKey] ?? []).map(([value, label]) => <button key={value} className={filters.scene === value ? 'active' : ''} onClick={() => setScene(value)}>{label}</button>)}{filters.scene === 'custom' && <button className="active">自定义</button>}</div>
     {activeFilterCount(filters) > 0 && <div className="library-result-head"><button onClick={clearFilters}><RotateCcw size={14} />清除筛选</button></div>}
     {selectionMode && selectedIds.size > 0 && <div className="batch-toolbar" role="region" aria-label="批量曲库操作"><span>已选 {selectedIds.size} 首</span><Button onClick={() => setBatchOpen(true)}>选择操作</Button><button className="text-action" onClick={() => setSelectedIds(new Set())}>清空选择</button></div>}
+    {(searchPending || (list.isFetching && !list.isLoading)) && <div className="library-search-status" role="status">{searchPending ? '正在准备搜索...' : '正在更新结果...'}</div>}
     <div className="library-list-wrap"><div className="song-list alphabet-song-list">{shown.map((song, index) => <div key={`${song.scope}-${song.id}`} className={`alphabet-song-group ${selectionMode && selectedIds.has(song.id) ? 'selection-selected' : ''}`}>{(index === 0 || shown[index - 1]?.titleInitial !== song.titleInitial) && <h3 id={`song-group-${song.titleInitial}`} className="alphabet-group-title">{song.titleInitial}</h3>}{selectionMode && song.scope === 'personal' && <label className="song-selection"><input type="checkbox" checked={selectedIds.has(song.id)} onChange={() => toggleSelection(song.id)} aria-label={`选择${song.title}`} /><span>选择</span></label>}<SongCard song={song} variant={cardVariant(song)} onClick={() => selectionMode && song.scope === 'personal' ? toggleSelection(song.id) : setDetail(song)} action={selectionMode && song.scope === 'personal' ? undefined : song.scope === 'personal' ? song.collectionType === 'repertoire'
       ? <IconButton label={`将${song.title}加入下一次 KTV`} onClick={() => addKtv.mutate(song.id)}><ListPlus size={19} /></IconButton>
       : <IconButton label={`将${song.title}转为会唱`} onClick={() => updateCollection.mutate({ id: song.id, target: 'repertoire' })}><Sparkles size={19} /></IconButton>
-      : song.collectionType === null ? <button className="collect-button" onClick={() => setDetail(song)}>＋ 收录</button> : undefined} /></div>)}</div>{Boolean(resultMeta?.alphabetIndex.length) && <nav className="alphabet-rail" aria-label="按歌名首字母定位">{alphabet.map((letter) => <button key={letter} disabled={!resultMeta?.alphabetIndex.some((item) => item.initial === letter)} onPointerEnter={(event) => event.buttons === 1 && jumpTo(letter)} onClick={() => jumpTo(letter)} aria-label={`定位到 ${letter} 组`}>{letter}</button>)}</nav>}</div>
+      : song.collectionType === null ? <button className="collect-button" disabled={pendingCollectionId !== null} onClick={() => setDetail(song)}>＋ 收录</button> : undefined} /></div>)}</div>{Boolean(resultMeta?.alphabetIndex.length) && <nav className="alphabet-rail" aria-label="按歌名首字母定位">{alphabet.map((letter) => <button key={letter} disabled={!resultMeta?.alphabetIndex.some((item) => item.initial === letter)} onPointerEnter={(event) => event.buttons === 1 && jumpTo(letter)} onClick={() => jumpTo(letter)} aria-label={`定位到 ${letter} 组`}>{letter}</button>)}</nav>}</div>
     {letterFeedback && <div className="letter-feedback" role="status">{letterFeedback}</div>}
-    {!list.isLoading && !shown.length && <EmptyState
-      title={search || activeFilterCount(filters) ? '没有符合条件的歌曲' : scope === 'global' ? '全部曲库还是空的' : collection === 'repertoire' ? '会唱曲库还是空的' : '待学清单还是空的'}
-      description={search || activeFilterCount(filters) ? '搜索范围包含歌名、歌手、版本、拼音、别名、歌词和个人备注；可以修改关键词或清除筛选。' : scope === 'global' ? '添加第一首全站歌曲，收录后即可长期管理。' : collection === 'repertoire' ? '从全部曲库收录会唱的歌，Pick 才真正懂你。' : '把想学的歌先放在这里，不会进入普通 Pick。'}
-      action={scope === 'personal' && collection === 'repertoire'
-        ? search || activeFilterCount(filters) ? <Button onClick={() => { setSearch(''); clearFilters(); }}>清除查找条件</Button> : <><Button onClick={() => setScope('global')}>去全部曲库选歌</Button><Button className="secondary" onClick={() => setCollection('learning')}>查看待学清单</Button></>
-        : <Button onClick={() => setAddOpen(true)}><Plus size={18} />添加歌曲</Button>}
+    {list.isLoading && <div className="library-loading" role="status">正在加载{scope === 'global' ? '全部曲库' : collection === 'repertoire' ? '会唱曲库' : '待学清单'}...</div>}
+    {list.isError && <div className="library-load-error" role="alert"><strong>曲库暂时无法加载</strong><span>{list.error instanceof ApiError ? list.error.message : '请检查本地服务后重试。'}</span><Button className="secondary compact" onClick={() => void list.refetch()}>重新加载</Button></div>}
+    {meta.isError && <div className="library-meta-warning" role="status"><span>数量和筛选项暂时无法更新，歌曲列表仍可使用。</span><Button className="secondary compact" onClick={() => void meta.refetch()}>重试元数据</Button></div>}
+    {!list.isLoading && !list.isError && !list.isFetching && !shown.length && <EmptyState
+      title={hasSearchOrFilters ? '没有符合条件的歌曲' : scope === 'global' ? '全部曲库还是空的' : collection === 'repertoire' ? '会唱曲库还是空的' : '待学清单还是空的'}
+      description={hasSearchOrFilters ? '搜索范围包含歌名、歌手、版本、拼音、别名、歌词和个人备注；可以修改关键词或清除筛选。' : scope === 'global' ? '添加第一首歌曲到全部曲库，之后就能收录到自己的曲库。' : collection === 'repertoire' ? '从全部曲库收录会唱的歌，Pick 才真正懂你。' : '把想学的歌先放在这里，不会进入普通 Pick。'}
+      action={hasSearchOrFilters
+        ? <Button onClick={() => { setSearchInput(''); setSearch(''); clearFilters(); }}>清除查找条件</Button>
+        : scope === 'personal' && collection === 'repertoire'
+          ? <><Button onClick={() => setScope('global')}>去全部曲库选歌</Button><Button className="secondary" onClick={() => setCollection('learning')}>查看待学清单</Button></>
+          : <Button onClick={() => setAddOpen(true)}><Plus size={18} />添加第一首歌曲</Button>}
     />}
     {list.hasNextPage && <Button className="secondary load-more" disabled={list.isFetchingNextPage} onClick={() => list.fetchNextPage()}>{list.isFetchingNextPage ? '正在加载' : '加载更多'}</Button>}
     <AddSongSheet key={`${initialAddSong?.title ?? ''}|${initialAddSong?.artist ?? ''}|${initialAddSong?.version ?? ''}`} open={addOpen} onOpenChange={(open) => { setAddOpen(open); if (!open) onSharedSongConsumed?.(); }} defaultCollection={collection} prefill={initialAddSong ?? null} onAdded={async (message) => { setAddOpen(false); onSharedSongConsumed?.(); await client.invalidateQueries({ queryKey: ['library-search'] }); notify(message); }} />
     <BatchActionSheet open={batchOpen} count={selectedIds.size} onOpenChange={setBatchOpen} loading={batchUpdate.isPending} onAction={(body) => batchUpdate.mutate(body)} />
     <Sheet open={detail !== null} onOpenChange={(open) => !open && setDetail(null)} title="歌曲操作">{detail && <div className="sheet-stack"><SongCard song={detail} variant={cardVariant(detail)} />{canEditGlobal && <Button className="secondary" onClick={() => { setEditSong(detail); setDetail(null); }}><Pencil size={18} />编辑全局歌曲信息</Button>}{detail.scope === 'global' ? detail.collectionType === null ? <>
-      <Button onClick={() => updateCollection.mutate({ id: detail.id, target: 'repertoire' })}>我会唱，加入会唱曲库</Button>
-      <Button className="secondary" onClick={() => updateCollection.mutate({ id: detail.id, target: 'learning' })}>还不会，加入待学清单</Button>
+      <Button loading={pendingCollectionId === detail.id && updateCollection.variables?.target === 'repertoire'} onClick={() => updateCollection.mutate({ id: detail.id, target: 'repertoire' })}>我会唱，加入会唱曲库</Button>
+      <Button className="secondary" loading={pendingCollectionId === detail.id && updateCollection.variables?.target === 'learning'} onClick={() => updateCollection.mutate({ id: detail.id, target: 'learning' })}>还不会，加入待学清单</Button>
     </> : <Button onClick={() => goPersonal(detail.collectionType!)}>查看我的{detail.collectionType === 'repertoire' ? '会唱曲库' : '待学清单'}</Button> : <><PersonalSongSettings songId={detail.id} notify={notify} onSaved={async () => { await client.invalidateQueries({ queryKey: ['library-search'] }); }} />
       {detail.collectionType === 'repertoire' && <Button onClick={() => addKtv.mutate(detail.id)}><ListPlus size={18} />加入下一次 KTV</Button>}
       {Boolean(playlists.data?.playlists.length) && <div><p className="helper">加入普通歌单</p><div className="chips playlist-chips">{playlists.data!.playlists.map((playlist) => <button key={playlist.id} onClick={() => addPlaylist.mutate({ playlistId: playlist.id, songId: detail.id })}>{playlist.name}</button>)}</div></div>}
@@ -193,7 +296,7 @@ export function LibraryPage({ notify, canEditGlobal, initialScope = 'personal', 
       <Button className="secondary" onClick={() => updateCollection.mutate({ id: detail.id, target: detail.collectionType === 'repertoire' ? 'learning' : 'repertoire' })}><Sparkles size={18} />移至{detail.collectionType === 'repertoire' ? '待学清单' : '会唱曲库'}</Button>
     </>}{detail.scope === 'global' && <DeletionRequestButton songId={detail.id} notify={notify} />}</div>}</Sheet>
     <Sheet open={ktvOpen} onOpenChange={(open) => { setKtvOpen(open); if (!open) setClearKtvConfirm(false); }} title="下一次 KTV"><div className="sheet-stack"><p className="helper">这里的歌曲会成为 Pick 的第一候选池，唱完后自动移出。</p><div className="ktv-sheet-actions"><Button onClick={() => setKtvAddOpen(true)}><Plus size={18} />添加歌曲</Button>{Boolean(ktv.data?.songs.length) && <Button className="secondary danger-button" onClick={() => setClearKtvConfirm(true)}>清空歌单</Button>}</div>{clearKtvConfirm && <div className="inline-confirm"><span>确定移除歌单内全部歌曲？</span><button type="button" onClick={() => setClearKtvConfirm(false)}>取消</button><button type="button" className="danger-text" disabled={clearKtv.isPending} onClick={() => clearKtv.mutate()}>{clearKtv.isPending ? '正在清空' : '确认清空'}</button></div>}<div className="song-list">{ktv.data?.songs.map((song) => <BasicSongCard key={song.id} song={song} action={<IconButton label={`从下一次 KTV 移除${song.title}`} disabled={removeKtv.isPending} onClick={() => removeKtv.mutate(song.id)}><X size={18} /></IconButton>} />)}</div>{!ktv.isLoading && !ktv.data?.songs.length && <EmptyState title="还没有准备歌曲" description="从会唱曲库挑选几首下次一定想唱的歌。" action={<Button onClick={() => setKtvAddOpen(true)}><Plus size={18} />添加歌曲</Button>} />}</div></Sheet>
-    <Sheet open={ktvAddOpen} onOpenChange={setKtvAddOpen} title="添加到下一次 KTV"><div className="sheet-stack"><div className="search-box"><Search size={18} /><input aria-label="搜索会唱歌曲" value={ktvSearch} onChange={(event) => setKtvSearch(event.target.value)} placeholder="搜索会唱曲库" /></div><div className="song-list">{ktvCandidates.data?.songs.filter((song): song is PersonalSongListItem => song.scope === 'personal' && !ktv.data?.songs.some((item) => item.id === song.id)).map((song) => <SongCard key={song.id} song={song} variant="personal-repertoire" action={<IconButton label={`添加${song.title}到下一次 KTV`} disabled={addKtv.isPending} onClick={() => addKtv.mutate(song.id)}><Plus size={18} /></IconButton>} />)}</div>{!ktvCandidates.isLoading && !ktvCandidates.data?.songs.filter((song) => !ktv.data?.songs.some((item) => item.id === song.id)).length && <EmptyState title="没有可添加的歌曲" description="会唱曲库中的歌曲都已加入，或还没有符合搜索的歌曲。" />}</div></Sheet>
+    <Sheet open={ktvAddOpen} onOpenChange={setKtvAddOpen} title="添加到下一次 KTV"><div className="sheet-stack"><div className="search-box"><Search size={18} /><input aria-label="搜索会唱歌曲" value={ktvSearchInput} onChange={(event) => setKtvSearchInput(event.target.value)} placeholder="搜索会唱曲库" /></div>{ktvCandidates.isFetching && <p className="helper" role="status">正在更新歌曲...</p>}<div className="song-list">{ktvCandidates.data?.songs.filter((song): song is PersonalSongListItem => song.scope === 'personal' && !ktv.data?.songs.some((item) => item.id === song.id)).map((song) => <SongCard key={song.id} song={song} variant="personal-repertoire" action={<IconButton label={`添加${song.title}到下一次 KTV`} disabled={addKtv.isPending} onClick={() => addKtv.mutate(song.id)}><Plus size={18} /></IconButton>} />)}</div>{!ktvCandidates.isLoading && !ktvCandidates.isFetching && !ktvCandidates.data?.songs.filter((song) => !ktv.data?.songs.some((item) => item.id === song.id)).length && <EmptyState title="没有可添加的歌曲" description="会唱曲库中的歌曲都已加入，或还没有符合搜索的歌曲。" />}</div></Sheet>
     <LyricsSheet song={lyricsSong} onClose={() => setLyricsSong(null)} notify={notify} />
     <EditSongSheet song={editSong} onClose={() => setEditSong(null)} notify={notify} onSaved={async () => {
       setEditSong(null);

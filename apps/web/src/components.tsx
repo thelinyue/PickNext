@@ -5,6 +5,7 @@ import { BookOpen, Camera, Check, Dice5, History, Library, LoaderCircle, Mic2, M
 import { motion } from 'motion/react';
 import type { GlobalSongListItem, PersonalSongListItem } from '@picknext/shared';
 import { api } from './api.js';
+import { readThemeMode, setThemeMode, type ThemeMode } from './theme.js';
 
 export function Button({ className = '', children, loading = false, disabled, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { loading?: boolean }) {
   return <button className={`button ${className}`} disabled={disabled || loading} aria-busy={loading || undefined} {...props}>{loading && <LoaderCircle className="spin" size={18} />}{children}</button>;
@@ -128,7 +129,7 @@ const pickNavPresentation = {
   exhausted: { label: '结束', accessibleName: '处理本场', icon: Check }
 } as const;
 
-/** 底部导航只负责展示明确状态；Pick 的业务动作由应用级控制器统一决定。 */
+/** 中央 Pick 按钮是歌手端的上下文动作入口，状态随当前演唱场次变化。 */
 export function AppShell({ page, onNavigate, onPickAction, pickState, children }: PropsWithChildren<{ page: NavigationPage; onNavigate(page: NavigationPage): void; onPickAction(): void; pickState: PickNavState }>) {
   const items = [
     { id: 'library' as const, label: '曲库', icon: Library },
@@ -156,6 +157,7 @@ function ProfilePageHeader({ fallbackTitle }: { fallbackTitle: string }) {
   const [open, setOpen] = useState(false);
   const [nickname, setNickname] = useState('');
   const [avatar, setAvatar] = useState<string | null | undefined>(undefined);
+  const [themeMode, setThemeModeState] = useState<ThemeMode>(() => readThemeMode());
   const fileRef = useRef<HTMLInputElement>(null);
   const apiUser = profile.data?.user;
   const user = apiUser ? { ...apiUser, nickname: apiUser.nickname ?? null, displayName: apiUser.displayName ?? apiUser.nickname ?? apiUser.username, avatarUrl: apiUser.avatarUrl ?? null } : { username: fallbackTitle, nickname: null, displayName: fallbackTitle, avatarUrl: null };
@@ -172,6 +174,10 @@ function ProfilePageHeader({ fallbackTitle }: { fallbackTitle: string }) {
     const reader = new FileReader(); reader.onload = () => setAvatar(typeof reader.result === 'string' ? reader.result : null); reader.readAsDataURL(file);
   };
   const avatarPreview = avatar === undefined ? user.avatarUrl : avatar;
+  const changeTheme = (mode: ThemeMode) => {
+    setThemeModeState(mode);
+    setThemeMode(mode);
+  };
   return <>
     <header className="page-header profile-page-header"><button className="profile-identity-trigger" onClick={() => setOpen(true)} aria-label="编辑个人信息"><div className="profile-identity-copy"><span>欢迎回来</span><h1>{user.displayName}</h1></div></button><button className="profile-avatar-trigger" onClick={() => setOpen(true)} aria-label="编辑头像"><ProfileAvatar user={user} /><Pencil size={14} /></button></header>
     <Sheet open={open} onOpenChange={setOpen} title="个人信息"><div className="profile-editor">
@@ -180,6 +186,7 @@ function ProfilePageHeader({ fallbackTitle }: { fallbackTitle: string }) {
       {avatarPreview && <button className="profile-remove-avatar" onClick={() => setAvatar(null)}>移除头像</button>}
       <label>昵称<input maxLength={40} value={nickname} onChange={(event) => setNickname(event.target.value)} placeholder="设置一个展示昵称" /></label>
       <label>登录用户名<input value={`@${user.username}`} readOnly /></label>
+      <label>界面主题<select aria-label="界面主题" value={themeMode} onChange={(event) => changeTheme(event.target.value as ThemeMode)}><option value="system">自适应</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
       <p className="helper">昵称会显示在个人页、歌单和管理后台；登录用户名保持不变。</p>
       <div className="profile-editor-actions"><Button className="secondary" onClick={() => setOpen(false)}>取消</Button><Button loading={save.isPending} onClick={() => save.mutate()}>保存资料</Button></div>
     </div></Sheet>

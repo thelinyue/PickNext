@@ -347,6 +347,18 @@ describe('核心 API 纵向闭环', () => {
     const page = await app.inject({ method: 'GET', url: '/api/search?scope=global&limit=1&offset=0', headers: { cookie } });
     expect(page.json()).toMatchObject({ total: 3, hasMore: true });
 
+    const quick = await app.inject({ method: 'GET', url: '/api/search/quick?scope=global&limit=1&offset=0', headers: { cookie } });
+    expect(quick.statusCode).toBe(200);
+    expect(quick.json()).toMatchObject({ hasMore: true });
+    expect(quick.json().songs[0]).not.toHaveProperty('personalDifficulty');
+    const meta = await app.inject({ method: 'GET', url: '/api/search/meta?scope=global&q=全站歌曲', headers: { cookie } });
+    expect(meta.statusCode).toBe(200);
+    expect(meta.json()).toMatchObject({ total: 1, counts: { global: 3 } });
+    const quickPersonal = await app.inject({ method: 'GET', url: '/api/search/quick?scope=personal&collection=repertoire', headers: { cookie } });
+    expect(quickPersonal.statusCode).toBe(200);
+    expect(quickPersonal.json().songs[0]).toMatchObject({ scope: 'personal', collectionType: 'repertoire' });
+    expect(quickPersonal.json().songs[0]).not.toHaveProperty('aggregateRating');
+
     const invalid = await app.inject({ method: 'GET', url: '/api/search?scope=global&collection=repertoire', headers: { cookie } });
     expect(invalid.statusCode).toBe(400);
   });

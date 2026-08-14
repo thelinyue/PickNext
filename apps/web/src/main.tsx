@@ -3,7 +3,12 @@ import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import App from './App.js';
 import { isNetworkError } from './api.js';
+import { applyStoredTheme, watchSystemTheme } from './theme.js';
 import './styles.css';
+
+applyStoredTheme();
+const stopThemeWatch = watchSystemTheme();
+if (import.meta.hot) import.meta.hot.dispose(stopThemeWatch);
 
 const client = new QueryClient({ defaultOptions: {
   queries: {
